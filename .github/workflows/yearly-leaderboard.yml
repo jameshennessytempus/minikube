@@ -6,7 +6,7 @@ on:
     - cron: "0 0 2 * *"
 env:
   GOPROXY: https://proxy.golang.org
-  GO_VERSION: '1.19.3'
+  GO_VERSION: '1.19.5'
 permissions:
   contents: read
 
@@ -19,10 +19,12 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       AWS_DEFAULT_REGION: 'us-west-1'
     steps:
-      - uses: actions/checkout@93ea575cb5d8a053eaa0ac8fa3b40d7e05a33cc8
-      - uses: actions/setup-go@c4a742cab115ed795e34d4513e2cf7d472deb55f
+      - uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
+      - uses: actions/setup-go@6edd4406fa81c3da01a34fa6f6343087c207a568
         with:
           go-version: ${{env.GO_VERSION}}
+          cache: true
+          cache-dependency-path: ./go.sum
       - name: Update Yearly Leaderboard
         id: yearlyLeaderboard
         run: |
@@ -35,7 +37,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.MINIKUBE_BOT_PAT }}
       - name: Create PR
         if: ${{ steps.yearlyLeaderboard.outputs.changes != '' }}
-        uses: peter-evans/create-pull-request@b4d51739f96fca8047ad065eccef63442d8e99f7
+        uses: peter-evans/create-pull-request@2b011faafdcbc9ceb11414d64d0573f37c774b04
         with:
           token: ${{ secrets.MINIKUBE_BOT_PAT }}
           commit-message: Update yearly leaderboard

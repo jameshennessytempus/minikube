@@ -39,6 +39,9 @@ tests the OLM addon
 #### validateCSIDriverAndSnapshots
 tests the csi hostpath driver by creating a persistent volume, snapshotting it and restoring it.
 
+#### validateGCPAuthNamespaces
+validates that newly created namespaces contain the gcp-auth secret.
+
 #### validateGCPAuthAddon
 tests the GCP Auth addon with either phony or real credentials and makes sure the files are mounted into pods correctly
 
@@ -422,6 +425,24 @@ verifies files and packages installed inside minikube ISO/Base image
 ## TestGvisorAddon
 tests the functionality of the gVisor addon
 
+## TestImageBuild
+makes sure the 'minikube image build' command works fine
+
+#### validateNormalImageBuild
+is normal test case for minikube image build, with -t parameter
+
+#### validateNormalImageBuildWithSpecifiedDockerfile
+is normal test case for minikube image build, with -t and -f parameter
+
+#### validateImageBuildWithBuildArg
+is a test case building with --build-opt
+
+#### validateImageBuildWithBuildEnv
+is a test case building with --build-env
+
+#### validateImageBuildWithDockerIgnore
+is a test case building with .dockerignore
+
 ## TestIngressAddonLegacy
 tests ingress and ingress-dns addons with legacy k8s version <1.19
 
@@ -451,6 +472,9 @@ verifies the docker driver and run with an existing network
 
 ## TestKicCustomSubnet
 verifies the docker/podman driver works with a custom subnet
+
+## TestKicStaticIP
+starts minikube with the static IP flag
 
 ## TestingKicBaseImage
 will return true if the integraiton test is running against a passed --base-image flag

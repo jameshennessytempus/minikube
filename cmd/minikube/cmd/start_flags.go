@@ -140,6 +140,7 @@ const (
 	qemuFirmwarePath        = "qemu-firmware-path"
 	socketVMnetClientPath   = "socket-vmnet-client-path"
 	socketVMnetPath         = "socket-vmnet-path"
+	staticIP                = "static-ip"
 )
 
 var (
@@ -200,6 +201,7 @@ func initMinikubeFlags() {
 	startCmd.Flags().String(binaryMirror, "", "Location to fetch kubectl, kubelet, & kubeadm binaries from.")
 	startCmd.Flags().Bool(disableOptimizations, false, "If set, disables optimizations that are set for local Kubernetes. Including decreasing CoreDNS replicas from 2 to 1. Defaults to false.")
 	startCmd.Flags().Bool(disableMetrics, false, "If set, disables metrics reporting (CPU and memory usage), this can improve CPU usage. Defaults to false.")
+	startCmd.Flags().String(staticIP, "", "Set a static IP for the minikube cluster, the IP must be: private, IPv4, and the last octet must be between 2 and 254, for example 192.168.200.200 (Docker and Podman drivers only)")
 }
 
 // initKubernetesFlags inits the commandline flags for Kubernetes related options
@@ -279,8 +281,8 @@ func initNetworkingFlags() {
 	startCmd.Flags().Int(sshSSHPort, defaultSSHPort, "SSH port (ssh driver only)")
 
 	// socket vmnet
-	startCmd.Flags().String(socketVMnetClientPath, "/opt/socket_vmnet/bin/socket_vmnet_client", "Path to the socket vmnet client binary")
-	startCmd.Flags().String(socketVMnetPath, "/var/run/socket_vmnet", "Path to socket vmnet binary")
+	startCmd.Flags().String(socketVMnetClientPath, "", "Path to the socket vmnet client binary (QEMU driver only)")
+	startCmd.Flags().String(socketVMnetPath, "", "Path to socket vmnet binary (QEMU driver only)")
 }
 
 // ClusterFlagValue returns the current cluster name based on flags
@@ -569,8 +571,9 @@ func generateNewConfigFromFlags(cmd *cobra.Command, k8sVersion string, rtime str
 		DisableOptimizations:    viper.GetBool(disableOptimizations),
 		DisableMetrics:          viper.GetBool(disableMetrics),
 		CustomQemuFirmwarePath:  viper.GetString(qemuFirmwarePath),
-		SocketVMnetClientPath:   viper.GetString(socketVMnetClientPath),
-		SocketVMnetPath:         viper.GetString(socketVMnetPath),
+		SocketVMnetClientPath:   detect.SocketVMNetClientPath(),
+		SocketVMnetPath:         detect.SocketVMNetPath(),
+		StaticIP:                viper.GetString(staticIP),
 		KubernetesConfig: config.KubernetesConfig{
 			KubernetesVersion:      k8sVersion,
 			ClusterName:            ClusterFlagValue(),
@@ -620,9 +623,18 @@ func generateNewConfigFromFlags(cmd *cobra.Command, k8sVersion string, rtime str
 			}
 			out.Styled(style.Notice, "Using {{.driver_name}} driver with root privileges", out.V{"driver_name": driver.FullName(drvName)})
 		}
+		// for btrfs: if k8s < v1.25.0-beta.0 set kubelet's LocalStorageCapacityIsolation feature gate flag to false,
+		// and if k8s >= v1.25.0-beta.0 (when it went ga and removed as feature gate), set kubelet's localStorageCapacityIsolation option (via kubeadm config) to false.
+		// ref: https://github.com/kubernetes/minikube/issues/14728#issue-1327885840
 		if si.StorageDriver == "btrfs" {
-			klog.Info("auto-setting LocalStorageCapacityIsolation to false because using btrfs storage driver")
-			cc.KubernetesConfig.FeatureGates = addFeatureGate(cc.KubernetesConfig.FeatureGates, "LocalStorageCapacityIsolation=false")
+			if semver.MustParse(strings.TrimPrefix(k8sVersion, version.VersionPrefix)).LT(semver.MustParse("1.25.0-beta.0")) {
+				klog.Info("auto-setting LocalStorageCapacityIsolation to false because using btrfs storage driver")
+				cc.KubernetesConfig.FeatureGates = addFeatureGate(cc.KubernetesConfig.FeatureGates, "LocalStorageCapacityIsolation=false")
+			} else if !cc.KubernetesConfig.ExtraOptions.Exists("kubelet.localStorageCapacityIsolation=false") {
+				if err := cc.KubernetesConfig.ExtraOptions.Set("kubelet.localStorageCapacityIsolation=false"); err != nil {
+					exit.Error(reason.InternalConfigSet, "failed to set extra option", err)
+				}
+			}
 		}
 		if runtime.GOOS == "linux" && si.DockerOS == "Docker Desktop" {
 			out.WarningT("For an improved experience it's recommended to use Docker Engine instead of Docker Desktop.\nDocker Engine installation instructions: https://docs.docker.com/engine/install/#server")
@@ -736,6 +748,10 @@ func updateExistingConfigFromFlags(cmd *cobra.Command, existing *config.ClusterC
 	checkExtraDiskOptions(cmd, cc.Driver)
 	if cmd.Flags().Changed(extraDisks) && viper.GetInt(extraDisks) != existing.ExtraDisks {
 		out.WarningT("You cannot add or remove extra disks for an existing minikube cluster. Please first delete the cluster.")
+	}
+
+	if cmd.Flags().Changed(staticIP) && viper.GetString(staticIP) != existing.StaticIP {
+		out.WarningT("You cannot change the static IP of an existing minikube cluster. Please first delete the cluster.")
 	}
 
 	updateBoolFromFlag(cmd, &cc.KeepContext, keepContext)

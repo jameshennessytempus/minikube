@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/juju/mutex"
+	"github.com/juju/mutex/v2"
 	"github.com/pkg/errors"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/detect"
@@ -42,6 +42,7 @@ const fileScheme = "file"
 func DefaultISOURLs() []string {
 	v := version.GetISOVersion()
 	isoBucket := "minikube/iso"
+
 	return []string{
 		fmt.Sprintf("https://storage.googleapis.com/%s/minikube-%s-%s.iso", isoBucket, v, runtime.GOARCH),
 		fmt.Sprintf("https://github.com/kubernetes/minikube/releases/download/%s/minikube-%s-%s.iso", v, v, runtime.GOARCH),
