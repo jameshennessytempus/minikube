@@ -21,10 +21,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"os"
 	"os/exec"
 	"path"
 	"strings"
 
+	"github.com/blang/semver/v4"
 	"github.com/pkg/errors"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/command"
@@ -138,7 +140,7 @@ func listCRIContainers(cr CommandRunner, root string, o ListContainersOptions) (
 	return fids, nil
 }
 
-// pauseContainers pauses a list of containers
+// pauseCRIContainers pauses a list of containers
 func pauseCRIContainers(cr CommandRunner, root string, ids []string) error {
 	baseArgs := []string{"runc"}
 	if root != "" {
@@ -190,7 +192,7 @@ func killCRIContainers(cr CommandRunner, ids []string) error {
 	klog.Infof("Killing containers: %s", ids)
 
 	crictl := getCrictlPath(cr)
-	args := append([]string{crictl, "rm"}, ids...)
+	args := append([]string{crictl, "rm", "--force"}, ids...)
 	c := exec.Command("sudo", args...)
 	if _, err := cr.RunCmd(c); err != nil {
 		return errors.Wrap(err, "crictl")
@@ -218,10 +220,28 @@ func removeCRIImage(cr CommandRunner, name string) error {
 	crictl := getCrictlPath(cr)
 	args := append([]string{crictl, "rmi"}, name)
 	c := exec.Command("sudo", args...)
-	if _, err := cr.RunCmd(c); err != nil {
-		return errors.Wrap(err, "crictl")
+	var err error
+	if _, err = cr.RunCmd(c); err == nil {
+		return nil
 	}
-	return nil
+	// the reason why we are doing this is that
+	// unlike other tool, podman assume the image has a localhost registry (not docker.io)
+	// if the image is loaded with a tarball without a registry specified in tag
+	// see https://github.com/containers/podman/issues/15974
+
+	// then retry with dockerio prefix
+	if _, err := cr.RunCmd(exec.Command("sudo", crictl, "rmi", AddDockerIO(name))); err == nil {
+		return nil
+	}
+
+	// then retry with localhost prefix
+	if _, err := cr.RunCmd(exec.Command("sudo", crictl, "rmi", AddLocalhostPrefix(name))); err == nil {
+
+		return nil
+	}
+
+	// if all of above failed, return original error
+	return errors.Wrap(err, "crictl")
 }
 
 // stopCRIContainers stops containers using crictl
@@ -232,7 +252,11 @@ func stopCRIContainers(cr CommandRunner, ids []string) error {
 	klog.Infof("Stopping containers: %s", ids)
 
 	crictl := getCrictlPath(cr)
-	args := append([]string{crictl, "stop"}, ids...)
+	// bring crictl stop timeout on par with docker:
+	// - docker stop --help => -t, --time int   Seconds to wait for stop before killing it (default 10)
+	// - crictl stop --help => --timeout value, -t value  Seconds to wait to kill the container after a graceful stop is requested (default: 0)
+	// to prevent "stuck" containers blocking ports (eg, "[ERROR Port-2379|2380]: Port 2379|2380 is in use" for etcd during "hot" k8s upgrade)
+	args := append([]string{crictl, "stop", "--timeout=10"}, ids...)
 	c := exec.Command("sudo", args...)
 	if _, err := cr.RunCmd(c); err != nil {
 		return errors.Wrap(err, "crictl")
@@ -243,9 +267,7 @@ func stopCRIContainers(cr CommandRunner, ids []string) error {
 // populateCRIConfig sets up /etc/crictl.yaml
 func populateCRIConfig(cr CommandRunner, socket string) error {
 	cPath := "/etc/crictl.yaml"
-	tmpl := `runtime-endpoint: unix://{{.Socket}}
-image-endpoint: unix://{{.Socket}}
-`
+	tmpl := "runtime-endpoint: unix://{{.Socket}}\n"
 	t, err := template.New("crictl").Parse(tmpl)
 	if err != nil {
 		return err
@@ -307,14 +329,14 @@ func listCRIImages(cr CommandRunner) ([]ListImage, error) {
 }
 
 // criContainerLogCmd returns the command to retrieve the log for a container based on ID
-func criContainerLogCmd(cr CommandRunner, id string, len int, follow bool) string {
+func criContainerLogCmd(cr CommandRunner, id string, length int, follow bool) string {
 	crictl := getCrictlPath(cr)
 	var cmd strings.Builder
 	cmd.WriteString("sudo ")
 	cmd.WriteString(crictl)
 	cmd.WriteString(" logs ")
-	if len > 0 {
-		cmd.WriteString(fmt.Sprintf("--tail %d ", len))
+	if length > 0 {
+		cmd.WriteString(fmt.Sprintf("--tail %d ", length))
 	}
 	if follow {
 		cmd.WriteString("--follow ")
@@ -334,4 +356,28 @@ func addRepoTagToImageName(imgName string) string {
 		return "docker.io/" + imgName
 	} // else it already has repo name dont add anything
 	return imgName
+}
+
+// kubeletCRIOptions returns the container runtime options for the kubelet
+func kubeletCRIOptions(cr Manager, kubernetesVersion semver.Version) map[string]string {
+	opts := map[string]string{
+		"container-runtime-endpoint": fmt.Sprintf("unix://%s", cr.SocketPath()),
+	}
+	if kubernetesVersion.LT(semver.MustParse("1.24.0-alpha.0")) {
+		opts["container-runtime"] = "remote"
+	}
+	return opts
+}
+
+func checkCNIPlugins(kubernetesVersion semver.Version) error {
+	if kubernetesVersion.LT(semver.Version{Major: 1, Minor: 24}) {
+		return nil
+	}
+	_, err := os.Stat("/opt/cni/bin")
+	return err
+}
+
+// Add localhost prefix if the registry part is missing
+func AddLocalhostPrefix(name string) string {
+	return addRegistryPreix(name, "localhost")
 }

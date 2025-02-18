@@ -17,6 +17,8 @@ limitations under the License.
 package cmd
 
 import (
+	"path/filepath"
+
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 
@@ -50,14 +52,16 @@ Default target node controlplane and If <source node name> is omitted, It will t
 Example Command : "minikube cp a.txt /home/docker/b.txt" +
                   "minikube cp a.txt minikube-m02:/home/docker/b.txt"
                   "minikube cp minikube-m01:a.txt minikube-m02:/home/docker/b.txt"`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, args []string) {
 		if len(args) != 2 {
 			exit.Message(reason.Usage, `Please specify the path to copy: 
 	minikube cp <source file path> <target file absolute path> (example: "minikube cp a/b.txt /copied.txt")`)
 		}
 
-		src := newRemotePath(args[0])
-		dst := newRemotePath(args[1])
+		srcPath := args[0]
+		dstPath := setDstFileNameFromSrc(args[1], srcPath)
+		src := newRemotePath(srcPath)
+		dst := newRemotePath(dstPath)
 		validateArgs(src, dst)
 
 		co := mustload.Running(ClusterFlagValue())
@@ -67,7 +71,7 @@ Example Command : "minikube cp a.txt /home/docker/b.txt" +
 			runner = remoteCommandRunner(&co, dst.node)
 		} else if src.node == "" {
 			// if node name not explicitly specified in both of source and target,
-			// consider target is controlpanel node for backward compatibility.
+			// consider target is control-plane node for backward compatibility.
 			runner = co.CP.Runner
 		} else {
 			runner = command.NewExecRunner(false)
@@ -80,7 +84,52 @@ Example Command : "minikube cp a.txt /home/docker/b.txt" +
 	},
 }
 
-func init() {
+// setDstFileNameFromSrc sets the src filename as dst filename
+// when the dst file name is not provided and ends with a `/`.
+// Otherwise this function is a no-op and returns the passed dst.
+func setDstFileNameFromSrc(dst, src string) string {
+	srcPath := newRemotePath(src)
+	dstPath := newRemotePath(dst)
+	guestToHost := srcPath.node != "" && dstPath.node == ""
+	guestToGuest := srcPath.node != "" && dstPath.node != ""
+
+	// Since Host can be any OS and Guest can only be linux, use
+	// filepath and path respectively
+	var dd, df, sf string
+	switch {
+	case guestToHost:
+		_, sf = pt.Split(src)
+		dd, df = filepath.Split(dst)
+	case guestToGuest:
+		_, sf = pt.Split(src)
+		dd, df = pt.Split(dst)
+	default:
+		_, sf = filepath.Split(src)
+		dd, df = pt.Split(dst)
+	}
+
+	// if dst is empty, dd and df will be empty, so return dst
+	// validation will be happening in `validateArgs`
+	if dd == "" && df == "" {
+		return ""
+	}
+
+	// if filename is already provided, return dst
+	if df != "" {
+		return dst
+	}
+
+	// if src filename is empty, return dst
+	if sf == "" {
+		return dst
+	}
+
+	// https://github.com/kubernetes/minikube/pull/15519/files#r1261750910
+	if guestToHost {
+		return filepath.Join(dd, sf)
+	}
+
+	return pt.Join(dd, sf)
 }
 
 // split path to node name and file path
@@ -159,7 +208,7 @@ func validateArgs(src, dst *remotePath) {
 	}
 
 	// if node name not explicitly specified in both of source and target,
-	// consider target node is controlpanel for backward compatibility.
+	// consider target node is control-plane for backward compatibility.
 	if src.node == "" && dst.node == "" && !strings.HasPrefix(dst.path, "/") {
 		exit.Message(reason.Usage, `Target <remote file path> must be an absolute Path. Relative Path is not allowed (example: "minikube:/home/docker/copied.txt")`)
 	}

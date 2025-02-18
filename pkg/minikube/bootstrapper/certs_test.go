@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"k8s.io/minikube/pkg/minikube/command"
 	"k8s.io/minikube/pkg/minikube/config"
@@ -55,11 +56,15 @@ func TestSetupCerts(t *testing.T) {
 	expected := map[string]string{
 		`sudo /bin/bash -c "test -s /usr/share/ca-certificates/mycert.pem && ln -fs /usr/share/ca-certificates/mycert.pem /etc/ssl/certs/mycert.pem"`:             "-",
 		`sudo /bin/bash -c "test -s /usr/share/ca-certificates/minikubeCA.pem && ln -fs /usr/share/ca-certificates/minikubeCA.pem /etc/ssl/certs/minikubeCA.pem"`: "-",
+		`date -u +%d-%m-%y-%T`: time.Now().Format("02-01-06-15:04:05"),
 	}
 	f := command.NewFakeCommandRunner()
 	f.SetCommandToOutput(expected)
 
-	if err := SetupCerts(f, k8s, config.Node{}); err != nil {
+	p := command.NewFakeCommandRunner()
+	p.SetCommandToOutput(map[string]string{})
+
+	if err := SetupCerts(k8s, config.Node{}, p, f); err != nil {
 		t.Fatalf("Error starting cluster: %v", err)
 	}
 }

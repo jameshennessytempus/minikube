@@ -75,7 +75,7 @@ var settings = []Setting{
 	},
 	{
 		name:        "cpus",
-		set:         SetInt,
+		set:         SetString,
 		validations: []setFn{IsValidCPUs},
 		callbacks:   []setFn{RequiresRestartMsg},
 	},
@@ -180,7 +180,7 @@ var ConfigCmd = &cobra.Command{
 	Short: "Modify persistent configuration values",
 	Long: `config modifies minikube config files using subcommands like "minikube config set driver kvm2"
 Configurable fields: ` + "\n\n" + configurableFields(),
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(cmd *cobra.Command, _ []string) {
 		if err := cmd.Help(); err != nil {
 			klog.ErrorS(err, "help")
 		}

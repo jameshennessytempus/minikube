@@ -38,6 +38,7 @@ import (
 	"k8s.io/minikube/pkg/kapi"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/detect"
+	"k8s.io/minikube/pkg/minikube/reason"
 	"k8s.io/minikube/pkg/util"
 	"k8s.io/minikube/pkg/util/retry"
 )
@@ -61,6 +62,7 @@ func validateTunnelCmd(ctx context.Context, t *testing.T, profile string) {
 			name      string
 			validator validateFunc
 		}{
+			{"RunSecondTunnel", validateNoSecondTunnel},            // Ensure no two tunnels run simultaneously
 			{"StartTunnel", validateTunnelStart},                   // Start tunnel
 			{"WaitService", validateServiceStable},                 // Wait for service is stable
 			{"AccessDirect", validateAccessDirect},                 // Access test for loadbalancer IP
@@ -98,8 +100,8 @@ func checkDNSForward(t *testing.T) {
 	}
 }
 
-// getKubeDNSIP returns kube-dns ClusterIP
-func getKubeDNSIP(t *testing.T, profile string) string {
+// kubeDNSIP returns kube-dns ClusterIP
+func kubeDNSIP(t *testing.T, profile string) string {
 	// Load ClusterConfig
 	c, err := config.Load(profile)
 	if err != nil {
@@ -111,7 +113,7 @@ func getKubeDNSIP(t *testing.T, profile string) string {
 		t.Errorf("failed to parse service CIDR: %v", err)
 	}
 	// Get kube-dns ClusterIP
-	ip, err := util.GetDNSIP(ipNet.String())
+	ip, err := util.DNSIP(ipNet.String())
 	if err != nil {
 		t.Errorf("failed to get kube-dns IP: %v", err)
 	}
@@ -129,6 +131,69 @@ func validateTunnelStart(ctx context.Context, t *testing.T, profile string) {
 		t.Errorf("failed to start a tunnel: args %q: %v", args, err)
 	}
 	tunnelSession = *ss
+}
+
+// validateNoSecondTunnel ensures only 1 tunnel can run simultaneously
+func validateNoSecondTunnel(ctx context.Context, t *testing.T, profile string) {
+	checkRoutePassword(t)
+
+	type SessInfo struct {
+		Stdout   string
+		Stderr   string
+		ExitCode int
+	}
+
+	sessCh := make(chan SessInfo)
+	sessions := make([]*StartSession, 2)
+
+	var runTunnel = func(idx int) {
+		args := []string{"-p", profile, "tunnel", "--alsologtostderr"}
+
+		ctx2, cancel := context.WithTimeout(ctx, Seconds(15))
+		defer cancel()
+		session, err := Start(t, exec.CommandContext(ctx2, Target(), args...))
+		if err != nil {
+			t.Errorf("failed to start tunnel: %v", err)
+		}
+		sessions[idx] = session
+
+		stderr, err := io.ReadAll(session.Stderr)
+		if err != nil {
+			t.Logf("Failed to read stderr: %v", err)
+		}
+		stdout, err := io.ReadAll(session.Stdout)
+		if err != nil {
+			t.Logf("Failed to read stdout: %v", err)
+		}
+
+		exitCode := 0
+		err = session.cmd.Wait()
+		if err != nil {
+			if exErr, ok := err.(*exec.ExitError); !ok {
+				t.Logf("failed to coerce exit error: %v", err)
+				exitCode = -1
+			} else {
+				exitCode = exErr.ExitCode()
+			}
+		}
+
+		sessCh <- SessInfo{Stdout: string(stdout), Stderr: string(stderr), ExitCode: exitCode}
+	}
+
+	// One of the two processes must fail to acquire lock and die. This should be the first process to die.
+	go runTunnel(0)
+	go runTunnel(1)
+
+	sessInfo := <-sessCh
+
+	if sessInfo.ExitCode != reason.SvcTunnelAlreadyRunning.ExitCode {
+		t.Errorf("tunnel command failed with unexpected error: exit code %d. stderr: %s\n stdout: %s", sessInfo.ExitCode, sessInfo.Stderr, sessInfo.Stdout)
+	}
+
+	for _, sess := range sessions {
+		sess.Stop(t)
+	}
+	<-sessCh
 }
 
 // validateServiceStable starts nginx pod, nginx service and waits nginx having loadbalancer ingress IP
@@ -165,7 +230,7 @@ func validateServiceStable(ctx context.Context, t *testing.T, profile string) {
 			t.Skip("The test WaitService/IngressIP is broken on hyperv https://github.com/kubernetes/minikube/issues/8381")
 		}
 		// Wait until the nginx-svc has a loadbalancer ingress IP
-		err := wait.PollImmediate(5*time.Second, Minutes(3), func() (bool, error) {
+		err := wait.PollUntilContextTimeout(ctx, 5*time.Second, Minutes(3), true, func(ctx context.Context) (bool, error) {
 			rr, err := Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "get", "svc", "nginx-svc", "-o", "jsonpath={.status.loadBalancer.ingress[0].ip}"))
 			if err != nil {
 				return false, err
@@ -247,7 +312,7 @@ func validateDNSDig(ctx context.Context, t *testing.T, profile string) {
 	checkRoutePassword(t)
 	checkDNSForward(t)
 
-	ip := getKubeDNSIP(t, profile)
+	ip := kubeDNSIP(t, profile)
 	dnsIP := fmt.Sprintf("@%s", ip)
 
 	// Check if the dig DNS lookup works toward kube-dns IP
@@ -274,7 +339,7 @@ func validateDNSDig(ctx context.Context, t *testing.T, profile string) {
 
 // validateDNSDscacheutil validates if the DNS forwarding works by dscacheutil command DNS lookup
 // NOTE: DNS forwarding is experimental: https://minikube.sigs.k8s.io/docs/handbook/accessing/#dns-resolution-experimental
-func validateDNSDscacheutil(ctx context.Context, t *testing.T, profile string) {
+func validateDNSDscacheutil(ctx context.Context, t *testing.T, _ string) {
 	if detect.GithubActionRunner() && runtime.GOOS == "darwin" {
 		t.Skip("skipping: access direct test is broken on github actions on macos https://github.com/kubernetes/minikube/issues/8434")
 	}
@@ -299,7 +364,7 @@ func validateDNSDscacheutil(ctx context.Context, t *testing.T, profile string) {
 
 // validateAccessDNS validates if the test service can be accessed with DNS forwarding from host
 // NOTE: DNS forwarding is experimental: https://minikube.sigs.k8s.io/docs/handbook/accessing/#dns-resolution-experimental
-func validateAccessDNS(ctx context.Context, t *testing.T, profile string) {
+func validateAccessDNS(_ context.Context, t *testing.T, profile string) {
 	if detect.GithubActionRunner() && runtime.GOOS == "darwin" {
 		t.Skip("skipping: access direct test is broken on github actions on macos https://github.com/kubernetes/minikube/issues/8434")
 	}
@@ -310,11 +375,11 @@ func validateAccessDNS(ctx context.Context, t *testing.T, profile string) {
 	got := []byte{}
 	url := fmt.Sprintf("http://%s", domain)
 
-	ip := getKubeDNSIP(t, profile)
+	ip := kubeDNSIP(t, profile)
 	dnsIP := fmt.Sprintf("%s:53", ip)
 
 	// Set kube-dns dial
-	kubeDNSDial := func(ctx context.Context, network, address string) (net.Conn, error) {
+	kubeDNSDial := func(ctx context.Context, _, _ string) (net.Conn, error) {
 		d := net.Dialer{}
 		return d.DialContext(ctx, "udp", dnsIP)
 	}
@@ -363,8 +428,13 @@ func validateAccessDNS(ctx context.Context, t *testing.T, profile string) {
 }
 
 // validateTunnelDelete stops `minikube tunnel`
-func validateTunnelDelete(ctx context.Context, t *testing.T, profile string) {
+func validateTunnelDelete(_ context.Context, t *testing.T, _ string) {
 	checkRoutePassword(t)
 	// Stop tunnel
 	tunnelSession.Stop(t)
+	// prevent the child process from becoming a defunct zombie process
+	if err := tunnelSession.cmd.Wait(); err != nil {
+		t.Logf("failed to stop process: %v", err)
+		return
+	}
 }

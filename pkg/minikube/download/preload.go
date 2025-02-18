@@ -25,11 +25,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/option"
-	"k8s.io/minikube/pkg/minikube/detect"
 
 	"github.com/pkg/errors"
 	"github.com/spf13/viper"
@@ -64,8 +64,7 @@ func TarballName(k8sVersion, containerRuntime string) string {
 	} else {
 		storageDriver = "overlay2"
 	}
-	arch := detect.EffectiveArch()
-	return fmt.Sprintf("preloaded-images-k8s-%s-%s-%s-%s-%s.tar.lz4", PreloadVersion, k8sVersion, containerRuntime, storageDriver, arch)
+	return fmt.Sprintf("preloaded-images-k8s-%s-%s-%s-%s-%s.tar.lz4", PreloadVersion, k8sVersion, containerRuntime, storageDriver, runtime.GOARCH)
 }
 
 // returns the name of the checksum file
@@ -137,14 +136,13 @@ func PreloadExists(k8sVersion, containerRuntime, driverName string, forcePreload
 	}
 
 	// If the preload existence is cached, just return that value.
-	preloadState, ok := preloadStates[k8sVersion][containerRuntime]
-	if ok {
+	if preloadState, ok := preloadStates[k8sVersion][containerRuntime]; ok {
 		return preloadState
 	}
 
 	// Omit remote check if tarball exists locally
 	targetPath := TarballPath(k8sVersion, containerRuntime)
-	if _, err := checkCache(targetPath); err == nil {
+	if f, err := checkCache(targetPath); err == nil && f.Size() != 0 {
 		klog.Infof("Found local preload: %s", targetPath)
 		setPreloadState(k8sVersion, containerRuntime, true)
 		return true
@@ -170,7 +168,7 @@ func Preload(k8sVersion, containerRuntime, driverName string) error {
 		return err
 	}
 
-	if _, err := checkCache(targetPath); err == nil {
+	if f, err := checkCache(targetPath); err == nil && f.Size() != 0 {
 		klog.Infof("Found %s in cache, skipping download", targetPath)
 		return nil
 	}

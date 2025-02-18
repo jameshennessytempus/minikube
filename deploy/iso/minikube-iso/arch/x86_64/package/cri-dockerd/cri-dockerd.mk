@@ -4,10 +4,9 @@
 #
 ################################################################################
 
-# As of 2022-06-09
-CRI_DOCKERD_VER = 0.2.2
-CRI_DOCKERD_REV = 0737013
-CRI_DOCKERD_VERSION = 0737013d3c48992724283d151e8a2a767a1839e9
+CRI_DOCKERD_VER = 0.3.15
+CRI_DOCKERD_REV = c1c566e
+CRI_DOCKERD_VERSION = c1c566e0cc84abe6972f0bf857ecd8fe306258d9
 CRI_DOCKERD_SITE = https://github.com/Mirantis/cri-dockerd/archive
 CRI_DOCKERD_SOURCE = $(CRI_DOCKERD_VERSION).tar.gz
 
@@ -23,6 +22,15 @@ CRI_DOCKERD_ENV = \
 
 CRI_DOCKERD_COMPILE_SRC = $(CRI_DOCKERD_GOPATH)/src/github.com/Mirantis/cri-dockerd
 CRI_DOCKERD_BUILDFLAGS = "-ldflags '-X github.com/Mirantis/cri-dockerd/version.Version=$(CRI_DOCKERD_VER) -X github.com/Mirantis/cri-dockerd/version.GitCommit=$(CRI_DOCKERD_REV)'"
+
+define CRI_DOCKERD_POST_EXTRACT_WORKAROUNDS
+	# Set -buildvcs=false to disable VCS stamping (fails in buildroot)
+	sed -i 's|go build |go build -buildvcs=false |' -i $(@D)/packaging/static/Makefile
+	# Use the GOARCH environment variable that we set
+	sed -i 's|GOARCH=$(ARCH) go build|GOARCH=$(GOARCH) go build|' -i $(@D)/packaging/static/Makefile
+endef
+
+CRI_DOCKERD_POST_EXTRACT_HOOKS += CRI_DOCKERD_POST_EXTRACT_WORKAROUNDS
 
 define CRI_DOCKERD_BUILD_CMDS
 	$(CRI_DOCKERD_ENV) $(MAKE) $(TARGET_CONFIGURE_OPTS) LDFLAGS=$(CRI_DOCKERD_BUILDFLAGS) GO_VERSION=$(GO_VERSION) -C $(@D) VERSION=$(CRI_DOCKERD_VER) REVISION=$(CRI_DOCKERD_REV) static-linux

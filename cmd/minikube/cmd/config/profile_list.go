@@ -23,10 +23,9 @@ import (
 	"strconv"
 	"strings"
 
-	"k8s.io/minikube/pkg/minikube/bootstrapper/bsutil/kverify"
+	"k8s.io/minikube/pkg/minikube/cluster"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/constants"
-	"k8s.io/minikube/pkg/minikube/driver"
 	"k8s.io/minikube/pkg/minikube/exit"
 	"k8s.io/minikube/pkg/minikube/machine"
 	"k8s.io/minikube/pkg/minikube/notify"
@@ -35,7 +34,6 @@ import (
 	"k8s.io/minikube/pkg/minikube/style"
 
 	"github.com/docker/machine/libmachine"
-	"github.com/docker/machine/libmachine/state"
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 
@@ -49,7 +47,7 @@ var profileListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "Lists all minikube profiles.",
 	Long:  "Lists all valid minikube profiles and detects all possible invalid profiles.",
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, _ []string) {
 		output := strings.ToLower(profileOutput)
 		out.SetJSON(output == "json")
 		go notify.MaybePrintUpdateTextFromGithub()
@@ -83,7 +81,7 @@ func printProfilesTable() {
 	}
 
 	if len(validProfiles) == 0 {
-		exit.Message(reason.UsageNoProfileRunning, "No minikube profile was found. ")
+		exit.Message(reason.UsageNoProfileRunning, "No minikube profile was found.")
 	}
 
 	updateProfilesStatus(validProfiles)
@@ -106,55 +104,33 @@ func updateProfilesStatus(profiles []*config.Profile) {
 	defer api.Close()
 
 	for _, p := range profiles {
-		p.Status = profileStatus(p, api)
+		p.Status = profileStatus(p, api).StatusName
 	}
 }
 
-func profileStatus(p *config.Profile, api libmachine.API) string {
-	cp, err := config.PrimaryControlPlane(p.Config)
-	if err != nil {
-		exit.Error(reason.GuestCpConfig, "error getting primary control plane", err)
+func profileStatus(p *config.Profile, api libmachine.API) cluster.State {
+	cps := config.ControlPlanes(*p.Config)
+	if len(cps) == 0 {
+		exit.Message(reason.GuestCpConfig, "No control-plane nodes found.")
 	}
+	statuses, err := cluster.GetStatus(api, p.Config)
+	if err != nil {
+		klog.Errorf("error getting statuses: %v", err)
+		return cluster.State{
+			BaseState: cluster.BaseState{
+				Name:       "Unknown",
+				StatusCode: 520,
+			},
+		}
+	}
+	clusterStatus := cluster.GetState(statuses, ClusterFlagValue(), p.Config)
 
-	host, err := machine.LoadHost(api, config.MachineName(*p.Config, cp))
-	if err != nil {
-		klog.Warningf("error loading profiles: %v", err)
-		return "Unknown"
-	}
-
-	// The machine isn't running, no need to check inside
-	s, err := host.Driver.GetState()
-	if err != nil {
-		klog.Warningf("error getting host state: %v", err)
-		return "Unknown"
-	}
-	if s != state.Running {
-		return s.String()
-	}
-
-	cr, err := machine.CommandRunner(host)
-	if err != nil {
-		klog.Warningf("error loading profiles: %v", err)
-		return "Unknown"
-	}
-
-	hostname, _, port, err := driver.ControlPlaneEndpoint(p.Config, &cp, host.DriverName)
-	if err != nil {
-		klog.Warningf("error loading profiles: %v", err)
-		return "Unknown"
-	}
-
-	status, err := kverify.APIServerStatus(cr, hostname, port)
-	if err != nil {
-		klog.Warningf("error getting apiserver status for %s: %v", p.Name, err)
-		return "Unknown"
-	}
-	return status.String()
+	return clusterStatus
 }
 
 func renderProfilesTable(ps [][]string) {
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Profile", "VM Driver", "Runtime", "IP", "Port", "Version", "Status", "Nodes", "Active"})
+	table.SetHeader([]string{"Profile", "VM Driver", "Runtime", "IP", "Port", "Version", "Status", "Nodes", "Active Profile", "Active Kubecontext"})
 	table.SetAutoFormatHeaders(false)
 	table.SetBorders(tablewriter.Border{Left: true, Top: true, Right: true, Bottom: true})
 	table.SetCenterSeparator("|")
@@ -166,20 +142,29 @@ func profilesToTableData(profiles []*config.Profile) [][]string {
 	var data [][]string
 	currentProfile := ClusterFlagValue()
 	for _, p := range profiles {
-		cp, err := config.PrimaryControlPlane(p.Config)
-		if err != nil {
-			exit.Error(reason.GuestCpConfig, "error getting primary control plane", err)
+		cpIP := p.Config.KubernetesConfig.APIServerHAVIP
+		cpPort := p.Config.APIServerPort
+		if !config.IsHA(*p.Config) {
+			cp, err := config.ControlPlane(*p.Config)
+			if err != nil {
+				exit.Error(reason.GuestCpConfig, "error getting control-plane node", err)
+			}
+			cpIP = cp.IP
+			cpPort = cp.Port
 		}
 
 		k8sVersion := p.Config.KubernetesConfig.KubernetesVersion
 		if k8sVersion == constants.NoKubernetesVersion { // for --no-kubernetes flag
 			k8sVersion = "N/A"
 		}
-		var c string
+		var c, k string
 		if p.Name == currentProfile {
 			c = "*"
 		}
-		data = append(data, []string{p.Name, p.Config.Driver, p.Config.KubernetesConfig.ContainerRuntime, cp.IP, strconv.Itoa(cp.Port), k8sVersion, p.Status, strconv.Itoa(len(p.Config.Nodes)), c})
+		if p.ActiveKubeContext {
+			k = "*"
+		}
+		data = append(data, []string{p.Name, p.Config.Driver, p.Config.KubernetesConfig.ContainerRuntime, cpIP, strconv.Itoa(cpPort), k8sVersion, p.Status, strconv.Itoa(len(p.Config.Nodes)), c, k})
 	}
 	return data
 }
@@ -196,7 +181,7 @@ func warnInvalidProfiles(invalidProfiles []*config.Profile) {
 
 	out.ErrT(style.Tip, "You can delete them using the following command(s): ")
 	for _, p := range invalidProfiles {
-		out.Err(fmt.Sprintf("\t $ minikube delete -p %s \n", p.Name))
+		out.Errf("\t $ minikube delete -p %s \n", p.Name)
 	}
 }
 

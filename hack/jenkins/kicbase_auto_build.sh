@@ -27,16 +27,28 @@ docker login -u ${DOCKERHUB_USER} -p ${DOCKERHUB_PASS}
 # Make sure golang is installed and configured
 ./hack/jenkins/installers/check_install_golang.sh "/usr/local" || true
 
+# install cron jobs
+source ./hack/jenkins/installers/check_install_linux_crons.sh
+
+./hack/jenkins/build_changelog.sh ./deploy/kicbase/CHANGELOG
+
 export GOBIN=/usr/local/go/bin
 export PATH=$PATH:$GOBIN
+
+generate_package_list() {
+	make
+	./out/minikube delete
+	./out/minikube start
+	./out/minikube ssh -- sudo dpkg -l --no-pager > hack/kicbase_version/os-package-list.txt
+	./out/minikube delete
+}
 
 # Let's make sure we have the newest kicbase reference
 curl -L https://github.com/kubernetes/minikube/raw/master/pkg/drivers/kic/types.go --output types-head.go
 # kicbase tags are of the form VERSION-TIMESTAMP-PR, so this grep finds that TIMESTAMP in the middle
 # if it doesn't exist, it will just return VERSION, which is covered in the if statement below
-HEAD_KIC_TIMESTAMP=$(egrep "Version =" types-head.go | cut -d \" -f 2 | cut -d "-" -f 2)
-CURRENT_KIC_VERSION=$(egrep "Version =" pkg/drivers/kic/types.go | cut -d \" -f 2)
-CURRENT_KIC_TS=$(echo $CURRENT_KIC_VERSION | cut -d "-" -f 2)
+HEAD_KIC_TIMESTAMP=$(grep -E "Version =" types-head.go | cut -d \" -f 2 | cut -d "-" -f 2)
+CURRENT_KIC_TS=$(grep -E "Version =" pkg/drivers/kic/types.go | cut -d \" -f 2 | cut -d "-" -f 2)
 if [[ $HEAD_KIC_TIMESTAMP != v* ]]; then
 	diff=$((CURRENT_KIC_TS-HEAD_KIC_TIMESTAMP))
 	if [[ $CURRENT_KIC_TS == v* ]] || [ $diff -lt 0 ]; then
@@ -51,7 +63,7 @@ if [[ -z $KIC_VERSION ]]; then
 	# Testing PRs here
 	release=false
 	now=$(date +%s)
-	KV=$(egrep "Version =" pkg/drivers/kic/types.go | cut -d \" -f 2 | cut -d "-" -f 1)
+	KV=$(grep -E "Version =" pkg/drivers/kic/types.go | cut -d \" -f 2 | cut -d "-" -f 1)
 	GCR_REPO=gcr.io/k8s-minikube/kicbase-builds
 	DH_REPO=docker.io/kicbase/build
 	export KIC_VERSION=$KV-$now-$ghprbPullId
@@ -66,33 +78,18 @@ GCR_IMG=${GCR_REPO}:${KIC_VERSION}
 DH_IMG=${DH_REPO}:${KIC_VERSION}
 export KICBASE_IMAGE_REGISTRIES="${GCR_IMG} ${DH_IMG}"
 
-if [ "$release" = false ]; then
-	# Build a new kicbase image
-	CIBUILD=yes make push-kic-base-image | tee kic-logs.txt
+# Build a new kicbase image
+CIBUILD=yes make push-kic-base-image | tee kic-logs.txt
 
-	# Abort with error message if above command failed
-	ec=$?
-	if [ $ec -gt 0 ]; then
-		if [ "$release" = false ]; then
-			gh pr comment ${ghprbPullId} --body "Hi ${ghprbPullAuthorLoginMention}, building a new kicbase image failed.  
-			See the logs at: https://storage.cloud.google.com/minikube-builds/logs/${ghprbPullId}/${ghprbActualCommit::7}/kic_image_build.txt
-			"
-		fi
-		exit $ec
+# Abort with error message if above command failed
+ec=$?
+if [ $ec -gt 0 ]; then
+	if [ "$release" = false ]; then
+		gh pr comment ${ghprbPullId} --body "Hi ${ghprbPullAuthorLoginMention}, building a new kicbase image failed.
+		See the logs at: https://storage.cloud.google.com/minikube-builds/logs/${ghprbPullId}/${ghprbActualCommit::7}/kic_image_build.txt
+		"
 	fi
-else
-	# Install crane, it does exactly what we want it to do
-	go install github.com/google/go-containerregistry/cmd/crane@latest
-
-	CURRENT_GCR_REPO=$(grep "gcrRepo =" pkg/drivers/kic/types.go | cut -d \" -f 2)
-	CURRENT_DH_REPO=$(grep "dockerhubRepo =" pkg/drivers/kic/types.go | cut -d \" -f 2)
-
-	CURRENT_GCR_IMG=$CURRENT_GCR_REPO:$CURRENT_KIC_VERSION
-	CURRENT_DH_IMG=$CURRENT_DH_REPO:$CURRENT_KIC_VERSION
-
-	crane copy $CURRENT_GCR_IMG $GCR_IMG
-	crane copy $CURRENT_DH_IMG $DH_IMG
-
+	exit $ec
 fi
 
 # Retrieve the sha from the new image
@@ -111,6 +108,7 @@ if [ "$release" = false ]; then
 	git checkout -b ${ghprbPullAuthorLogin}-${ghprbSourceBranch} ${ghprbPullAuthorLogin}/${ghprbSourceBranch}
 
 	sed -i "s|Version = .*|Version = \"${KIC_VERSION}\"|;s|baseImageSHA = .*|baseImageSHA = \"${sha}\"|;s|gcrRepo = .*|gcrRepo = \"${GCR_REPO}\"|;s|dockerhubRepo = .*|dockerhubRepo = \"${DH_REPO}\"|" pkg/drivers/kic/types.go; make generate-docs;
+	generate_package_list
 
 	git commit -am "Updating kicbase image to ${KIC_VERSION}"
 	git push ${ghprbPullAuthorLogin} HEAD:${ghprbSourceBranch}
@@ -133,11 +131,12 @@ else
 
 	sed -i "s|Version = .*|Version = \"${KIC_VERSION}\"|;s|baseImageSHA = .*|baseImageSHA = \"${sha}\"|;s|gcrRepo = .*|gcrRepo = \"${GCR_REPO}\"|;s|dockerhubRepo = .*|dockerhubRepo = \"${DH_REPO}\"|" pkg/drivers/kic/types.go
 	make generate-docs
+	generate_package_list
 
 	git add pkg/drivers/kic/types.go site/content/en/docs/commands/start.md
-	git commit -m "Update kicbase to ${KIC_VERSION}"
+	git commit -m "Release: Update kicbase to ${KIC_VERSION}"
 	git remote add minikube-bot git@github.com:minikube-bot/minikube.git
 	git push -f minikube-bot ${branch}
 
-	gh pr create --fill --base master --head minikube-bot:${branch}
+	gh pr create --fill --base master --head minikube-bot:${branch} -l "ok-to-test"
 fi

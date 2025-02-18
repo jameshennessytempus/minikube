@@ -33,7 +33,7 @@ import (
 	"k8s.io/minikube/pkg/minikube/translate"
 )
 
-func TestOutT(t *testing.T) {
+func TestStep(t *testing.T) {
 	// Set the system locale to Arabic and define a dummy translation file.
 	translate.SetPreferredLanguage(language.Arabic)
 
@@ -60,7 +60,7 @@ func TestOutT(t *testing.T) {
 		for _, override := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s-override-%v", tc.message, override), func(t *testing.T) {
 				// Set MINIKUBE_IN_STYLE=<override>
-				os.Setenv(OverrideEnv, strconv.FormatBool(override))
+				t.Setenv(OverrideEnv, strconv.FormatBool(override))
 				f := tests.NewFakeFile()
 				SetOutFile(f)
 				Step(tc.style, tc.message, tc.params)
@@ -70,15 +70,15 @@ func TestOutT(t *testing.T) {
 					want = tc.want
 				}
 				if got != want {
-					t.Errorf("OutStyle() = %q (%d runes), want %q (%d runes)", got, len(got), want, len(want))
+					t.Errorf("Step() = %q (%d runes), want %q (%d runes)", got, len(got), want, len(want))
 				}
 			})
 		}
 	}
 }
 
-func TestOut(t *testing.T) {
-	os.Setenv(OverrideEnv, "")
+func TestString(t *testing.T) {
+	t.Setenv(OverrideEnv, "")
 
 	testCases := []struct {
 		format string
@@ -97,27 +97,41 @@ func TestOut(t *testing.T) {
 			if tc.arg == nil {
 				String(tc.format)
 			} else {
-				String(tc.format, tc.arg)
+				Stringf(tc.format, tc.arg)
 			}
 			got := f.String()
 			if got != tc.want {
-				t.Errorf("Out(%s, %s) = %q, want %q", tc.format, tc.arg, got, tc.want)
+				t.Errorf("String(%s, %s) = %q, want %q", tc.format, tc.arg, got, tc.want)
 			}
 		})
 	}
 }
 
 func TestErr(t *testing.T) {
-	os.Setenv(OverrideEnv, "0")
+	t.Setenv(OverrideEnv, "0")
 	f := tests.NewFakeFile()
 	SetErrFile(f)
-	Err("xyz123 %s\n", "%s%%%d")
+	Err("xyz123\n")
+	Ln("unrelated message")
+	got := f.String()
+	want := "xyz123\n"
+
+	if got != want {
+		t.Errorf("Err() = %q, want %q", got, want)
+	}
+}
+
+func TestErrf(t *testing.T) {
+	t.Setenv(OverrideEnv, "0")
+	f := tests.NewFakeFile()
+	SetErrFile(f)
+	Errf("xyz123 %s\n", "%s%%%d")
 	Ln("unrelated message")
 	got := f.String()
 	want := "xyz123 %s%%%d\n"
 
 	if got != want {
-		t.Errorf("Err() = %q, want %q", got, want)
+		t.Errorf("Errf() = %q, want %q", got, want)
 	}
 }
 

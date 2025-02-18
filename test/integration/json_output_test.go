@@ -103,7 +103,7 @@ func TestJSONOutput(t *testing.T) {
 }
 
 // validateDistinctCurrentSteps makes sure each step has a distinct step number
-func validateDistinctCurrentSteps(ctx context.Context, t *testing.T, ces []*cloudEvent) {
+func validateDistinctCurrentSteps(_ context.Context, t *testing.T, ces []*cloudEvent) {
 	steps := map[string]string{}
 	for _, ce := range ces {
 		currentStep, exists := ce.data["currentstep"]
@@ -118,9 +118,9 @@ func validateDistinctCurrentSteps(ctx context.Context, t *testing.T, ces []*clou
 }
 
 // validateIncreasingCurrentSteps verifies that for a successful minikube start, 'current step' should be increasing
-func validateIncreasingCurrentSteps(ctx context.Context, t *testing.T, ces []*cloudEvent) {
+func validateIncreasingCurrentSteps(_ context.Context, t *testing.T, ces []*cloudEvent) {
 	step := -1
-	for _, ce := range ces {
+	for i, ce := range ces {
 		currentStep, exists := ce.data["currentstep"]
 		if !exists || ce.Type() != "io.k8s.sigs.minikube.step" {
 			continue
@@ -130,6 +130,17 @@ func validateIncreasingCurrentSteps(ctx context.Context, t *testing.T, ces []*cl
 			t.Fatalf("current step is not an integer: %v\n%v", currentStep, ce)
 		}
 		if cs <= step {
+			// check if steps are mixed because of goroutines complete in unusual order, but still ok
+			// eg, "Enabling Addons" (goroutine) might complete before or after "Verifying Kubernetes" finishes
+			if i > 0 {
+				prev := ces[i-1].data["name"]
+				cur := ce.data["name"]
+				if cur == "Verifying Kubernetes" && prev == "Enabling Addons" {
+					t.Logf("unusual order of steps, might be ok: %q event came before %q", prev, cur)
+					step = cs
+					continue
+				}
+			}
 			t.Fatalf("current step is not in increasing order: %v", ces)
 		}
 		step = cs

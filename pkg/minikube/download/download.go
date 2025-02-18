@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-getter"
-	"github.com/juju/mutex"
+	"github.com/juju/mutex/v2"
 	"github.com/pkg/errors"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/detect"
@@ -41,15 +41,21 @@ var (
 
 	aliyunMirror = "kubernetes.oss-cn-hangzhou.aliyuncs.com"
 	downloadHost = "storage.googleapis.com"
+
+	releaseHost = "dl.k8s.io"
+	releasePath = ""
 )
 
 // SetAliyunMirror set the download host for Aliyun mirror
 func SetAliyunMirror() {
 	downloadHost = aliyunMirror
+
+	releaseHost = downloadHost
+	releasePath = "/kubernetes-release"
 }
 
 // CreateDstDownloadMock is the default mock implementation of download.
-func CreateDstDownloadMock(src, dst string) error {
+func CreateDstDownloadMock(_, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return errors.Wrap(err, "mkdir")
 	}
@@ -59,7 +65,7 @@ func CreateDstDownloadMock(src, dst string) error {
 }
 
 // download is a well-configured atomic download function
-func download(src string, dst string) error {
+func download(src, dst string, options ...getter.ClientOption) error {
 	var clientOptions []getter.ClientOption
 	if out.IsTerminal(os.Stdout) && !detect.GithubActionRunner() {
 		progress := getter.WithProgress(DefaultProgressBar)
@@ -70,6 +76,7 @@ func download(src string, dst string) error {
 	} else {
 		clientOptions = []getter.ClientOption{}
 	}
+	clientOptions = append(clientOptions, options...)
 	tmpDst := dst + ".download"
 	client := &getter.Client{
 		Src:     src,
@@ -105,7 +112,7 @@ func download(src string, dst string) error {
 	return os.Rename(tmpDst, dst)
 }
 
-// withinUnitTset detects if we are in running within a unit-test
+// withinUnitTest detects if we are in running within a unit-test
 func withinUnitTest() bool {
 	// Nope, it's the integration test
 	if flag.Lookup("minikube-start-args") != nil || strings.HasPrefix(filepath.Base(os.Args[0]), "e2e-") {
@@ -125,6 +132,7 @@ func lockDownload(file string) (mutex.Releaser, error) {
 
 	go func() {
 		spec := lock.PathMutexSpec(file)
+		spec.Timeout = 5 * time.Minute
 		releaser, err := mutex.Acquire(spec)
 		if err != nil {
 			lockChannel <- retPair{nil, errors.Wrapf(err, "failed to acquire lock \"%s\": %+v", file, spec)}

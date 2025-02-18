@@ -34,7 +34,7 @@ bootstrapTokens:
       - signing
       - authentication
 nodeRegistration:
-  criSocket: {{if .CRISocket}}{{.CRISocket}}{{else}}/var/run/dockershim.sock{{end}}
+  criSocket: {{if .CRISocket}}{{if .PrependCriSocketUnix}}unix://{{end}}{{.CRISocket}}{{else}}{{if .PrependCriSocketUnix}}unix://{{end}}/var/run/dockershim.sock{{end}}
   name: "{{.NodeName}}"
   kubeletExtraArgs:
     node-ip: {{.NodeIP}}
@@ -78,6 +78,9 @@ authentication:
   x509:
     clientCAFile: {{.ClientCAFile}}
 cgroupDriver: {{.CgroupDriver}}
+{{- range $key, $val := .KubeletConfigOpts}}
+{{$key}}: {{$val}}
+{{- end}}
 clusterDomain: "{{if .DNSDomain}}{{.DNSDomain}}{{else}}cluster.local{{end}}"
 # disable disk resource management by default
 imageGCHighThresholdPercent: 100

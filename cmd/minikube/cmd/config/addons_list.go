@@ -48,7 +48,7 @@ var addonsListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "Lists all available minikube addons as well as their current statuses (enabled/disabled)",
 	Long:  "Lists all available minikube addons as well as their current statuses (enabled/disabled)",
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, args []string) {
 		if len(args) != 0 {
 			exit.Message(reason.Usage, "usage: minikube addons list")
 		}
@@ -166,13 +166,17 @@ var printAddonsJSON = func(cc *config.ClusterConfig) {
 
 		addonBundle := assets.Addons[addonName]
 		enabled := addonBundle.IsEnabled(cc)
-
 		addonsMap[addonName] = map[string]interface{}{
 			"Status":  stringFromStatus(enabled),
 			"Profile": cc.Name,
 		}
+		if addonPrintDocs {
+			addonsMap[addonName]["Maintainer"] = addonBundle.Maintainer
+			addonsMap[addonName]["Docs"] = addonBundle.Docs
+		}
 	}
-	jsonString, _ := json.Marshal(addonsMap)
 
+	jsonString, _ := json.Marshal(addonsMap)
 	out.String(string(jsonString))
+
 }

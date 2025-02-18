@@ -81,7 +81,7 @@ type Manager interface {
 	// Version retrieves the current version of this runtime
 	Version() (string, error)
 	// Enable idempotently enables this runtime on a host
-	Enable(bool, bool, bool) error
+	Enable(bool, string, bool) error
 	// Disable idempotently disables this runtime on a host
 	Disable() error
 	// Active returns whether or not a runtime is active on a host
@@ -147,12 +147,16 @@ type Config struct {
 	Socket string
 	// Runner is the CommandRunner object to execute commands with
 	Runner CommandRunner
+	// NetworkPlugin name of networking plugin ("cni")
+	NetworkPlugin string
 	// ImageRepository image repository to download image from
 	ImageRepository string
 	// KubernetesVersion Kubernetes version
 	KubernetesVersion semver.Version
 	// InsecureRegistry list of insecure registries
 	InsecureRegistry []string
+	// GPUs add GPU devices to the container
+	GPUs string
 }
 
 // ListContainersOptions are the options to use for listing containers
@@ -219,11 +223,13 @@ func New(c Config) (Manager, error) {
 		return &Docker{
 			Socket:            sp,
 			Runner:            c.Runner,
+			NetworkPlugin:     c.NetworkPlugin,
 			ImageRepository:   c.ImageRepository,
 			KubernetesVersion: c.KubernetesVersion,
 			Init:              sm,
 			UseCRI:            (sp != ""), // !dockershim
 			CRIService:        cs,
+			GPUs:              c.GPUs,
 		}, nil
 	case "crio", "cri-o":
 		return &CRIO{
@@ -335,19 +341,4 @@ func CheckKernelCompatibility(cr CommandRunner, major, minor int) error {
 		return NewErrServiceVersion("kernel", expected, actual)
 	}
 	return nil
-}
-
-func ConfigureNetworkPlugin(r Manager, cr CommandRunner, networkPlugin string) error {
-	// Only supported for Docker with cri-dockerd
-	if r.Name() != "Docker" {
-		if networkPlugin != "cni" {
-			return fmt.Errorf("unknown network plugin: %s", networkPlugin)
-		}
-		return nil
-	}
-	dm, ok := r.(*Docker)
-	if !ok {
-		return fmt.Errorf("name and type mismatch")
-	}
-	return dockerConfigureNetworkPlugin(*dm, cr, networkPlugin)
 }

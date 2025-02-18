@@ -13,9 +13,10 @@ The Docker driver allows you to install Kubernetes into an existing Docker insta
 {{% tab "Standard Docker" %}}
 ## Requirements
 
-- [Install Docker](https://hub.docker.com/search?q=&type=edition&offering=community&sort=updated_at&order=desc) 18.09 or higher (20.10 or higher is recommended)
+- [Install Docker](https://docs.docker.com/engine/install/) 18.09 or higher (20.10 or higher is recommended)
 - amd64 or arm64 system.
 - If using WSL complete [these steps]({{<ref "/docs/tutorials/wsl_docker_driver">}}) first
+- Don't forget to follow this [step](https://docs.docker.com/engine/install/linux-postinstall/#manage-docker-as-a-non-root-user) to manage Docker as a non-root user.
 
 ## Usage
 
@@ -49,7 +50,7 @@ minikube start --driver=docker --container-runtime=containerd
 Unlike Podman driver, it is not necessary to set the `rootless` property of minikube (`minikube config set rootless true`).
 When the `rootless` property is explicitly set but the current Docker host is not rootless, minikube fails with an error.
 
-The `--container-runtime` flag must be set to "containerd" or "cri-o". "containerd" is recommended.
+It is recommended to set the `--container-runtime` flag to "containerd".
 {{% /tab %}}
 {{% /tabs %}}
 
@@ -61,8 +62,6 @@ The `--container-runtime` flag must be set to "containerd" or "cri-o". "containe
 
 ## Known Issues
 
-- On Linux, Docker Desktop is not yet supported by minikube, see [#14202](https://github.com/kubernetes/minikube/issues/14202).
-
 - The following Docker runtime security options are currently *unsupported and will not work* with the Docker driver (see [#9607](https://github.com/kubernetes/minikube/issues/9607)):
   - [userns-remap](https://docs.docker.com/engine/security/userns-remap/)
 
@@ -73,6 +72,8 @@ The `--container-runtime` flag must be set to "containerd" or "cri-o". "containe
 - On WSL2 (experimental - see [#5392](https://github.com/kubernetes/minikube/issues/5392)), you may need to run:
 
    `sudo mkdir /sys/fs/cgroup/systemd && sudo mount -t cgroup -o none,name=systemd cgroup /sys/fs/cgroup/systemd`.
+
+Also see [co/docker-driver open issues](https://github.com/kubernetes/minikube/labels/co%2Fdocker-driver).
 
 ## Troubleshooting
 

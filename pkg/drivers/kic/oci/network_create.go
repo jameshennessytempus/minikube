@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"regexp"
 	"strings"
 
 	"github.com/blang/semver/v4"
@@ -63,7 +64,7 @@ func firstSubnetAddr(subnet string) string {
 }
 
 // CreateNetwork creates a network returns gateway and error, minikube creates one network per cluster
-func CreateNetwork(ociBin, networkName, subnet string) (net.IP, error) {
+func CreateNetwork(ociBin, networkName, subnet, staticIP string) (net.IP, error) {
 	defaultBridgeName := defaultBridgeName(ociBin)
 	if networkName == defaultBridgeName {
 		klog.Infof("skipping creating network since default network %s was specified", networkName)
@@ -84,12 +85,20 @@ func CreateNetwork(ociBin, networkName, subnet string) (net.IP, error) {
 		klog.Warningf("failed to get mtu information from the %s's default network %q: %v", ociBin, defaultBridgeName, err)
 	}
 
+	tries := 20
+
+	// we don't want to increment the subnet IP on network creation failure if the user specifies a static IP, so set tries to 1
+	if staticIP != "" {
+		tries = 1
+		subnet = staticIP
+	}
+
 	// retry up to 5 times to create container network
 	for attempts, subnetAddr := 0, firstSubnetAddr(subnet); attempts < 5; attempts++ {
 		// Rather than iterate through all of the valid subnets, give up at 20 to avoid a lengthy user delay for something that is unlikely to work.
 		// will be like 192.168.49.0/24,..., 192.168.220.0/24 (in increment steps of 9)
 		var subnet *network.Parameters
-		subnet, err = network.FreeSubnet(subnetAddr, 9, 20)
+		subnet, err = network.FreeSubnet(subnetAddr, 9, tries)
 		if err != nil {
 			klog.Errorf("failed to find free subnet for %s network %s after %d attempts: %v", ociBin, networkName, 20, err)
 			return nil, fmt.Errorf("un-retryable: %w", err)
@@ -137,6 +146,7 @@ func tryCreateDockerNetwork(ociBin string, subnet *network.Parameters, mtu int, 
 
 	rr, err := runCmd(exec.Command(ociBin, args...))
 	if err != nil {
+		klog.Warningf("failed to create %s network %s %s with gateway %s and mtu of %d: %v", ociBin, name, subnet.CIDR, subnet.Gateway, mtu, err)
 		// Pool overlaps with other one on this address space
 		if strings.Contains(rr.Output(), "Pool overlaps") {
 			return nil, ErrNetworkSubnetTaken
@@ -145,6 +155,9 @@ func tryCreateDockerNetwork(ociBin string, subnet *network.Parameters, mtu int, 
 			return nil, ErrNetworkGatewayTaken
 		}
 		if strings.Contains(rr.Output(), "is being used by a network interface") {
+			return nil, ErrNetworkGatewayTaken
+		}
+		if strings.Contains(rr.Output(), "is already used on the host or by another config") {
 			return nil, ErrNetworkGatewayTaken
 		}
 		return nil, fmt.Errorf("create %s network %s %s with gateway %s and MTU of %d: %w", ociBin, name, subnet.CIDR, subnet.Gateway, mtu, err)
@@ -198,8 +211,7 @@ func dockerNetworkInspect(name string) (netInfo, error) {
 	rr, err := dockerInspectGetter(name)
 	if err != nil {
 		logDockerNetworkInspect(Docker, name)
-		if strings.Contains(rr.Output(), "No such network") {
-
+		if isNetworkNotFound(rr.Output()) {
 			return info, ErrNetworkNotFound
 		}
 		return info, err
@@ -284,7 +296,7 @@ func RemoveNetwork(ociBin string, name string) error {
 	}
 	rr, err := runCmd(exec.Command(ociBin, "network", "rm", name))
 	if err != nil {
-		if strings.Contains(rr.Output(), "No such network") {
+		if isNetworkNotFound(rr.Output()) {
 			return ErrNetworkNotFound
 		}
 		// Error response from daemon: error while removing network: network mynet123 id f9e1c50b89feb0b8f4b687f3501a81b618252c9907bc20666e386d0928322387 has active endpoints
@@ -317,10 +329,10 @@ func networkNamesByLabel(ociBin string, label string) ([]string, error) {
 		lines = append(lines, strings.TrimSpace(scanner.Text()))
 	}
 
-	return lines, nil
+	return lines, scanner.Err()
 }
 
-// DeleteAllKICKNetworksByLabel deletes all networks that have a specific label
+// DeleteKICNetworksByLabel deletes all networks that have a specific label
 func DeleteKICNetworksByLabel(ociBin string, label string) []error {
 	var errs []error
 	ns, err := networkNamesByLabel(ociBin, label)
@@ -337,4 +349,10 @@ func DeleteKICNetworksByLabel(ociBin string, label string) []error {
 		return errs
 	}
 	return nil
+}
+
+func isNetworkNotFound(output string) bool {
+	// "No such network" on Docker 20.X.X and before, "network %s not found" on Docker 23.X.X and later
+	re := regexp.MustCompile(`(No such network)|(network .+ not found)`)
+	return re.MatchString(output)
 }

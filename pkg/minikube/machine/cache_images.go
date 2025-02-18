@@ -59,14 +59,14 @@ var loadImageLock sync.Mutex
 var saveRoot = path.Join(vmpath.GuestPersistentDir, "images")
 
 // CacheImagesForBootstrapper will cache images for a bootstrapper
-func CacheImagesForBootstrapper(imageRepository string, version string, clusterBootstrapper string) error {
-	images, err := bootstrapper.GetCachedImageList(imageRepository, version, clusterBootstrapper)
+func CacheImagesForBootstrapper(imageRepository, version string) error {
+	images, err := bootstrapper.GetCachedImageList(imageRepository, version)
 	if err != nil {
 		return errors.Wrap(err, "cached images list")
 	}
 
 	if err := image.SaveToDir(images, detect.ImageCacheDir(), false); err != nil {
-		return errors.Wrapf(err, "Caching images for %s", clusterBootstrapper)
+		return errors.Wrap(err, "Caching images")
 	}
 
 	return nil
@@ -85,11 +85,11 @@ func LoadCachedImages(cc *config.ClusterConfig, runner command.Runner, images []
 		return nil
 	}
 
-	klog.Infof("LoadImages start: %s", images)
+	klog.Infof("LoadCachedImages start: %s", images)
 	start := time.Now()
 
 	defer func() {
-		klog.Infof("LoadImages completed in %s", time.Since(start))
+		klog.Infof("duration metric: took %s to LoadCachedImages", time.Since(start))
 	}()
 
 	var g errgroup.Group
@@ -118,7 +118,7 @@ func LoadCachedImages(cc *config.ClusterConfig, runner command.Runner, images []
 		})
 	}
 	if err := g.Wait(); err != nil {
-		return errors.Wrap(err, "loading cached images")
+		return errors.Wrap(err, "LoadCachedImages")
 	}
 	klog.Infoln("Successfully loaded all cached images")
 	return nil
@@ -223,7 +223,6 @@ func DoLoadImages(images []string, profiles []*config.Profile, cacheDir string, 
 
 		for _, n := range c.Nodes {
 			m := config.MachineName(*c, n)
-
 			status, err := Status(api, m)
 			if err != nil {
 				klog.Warningf("error getting status for %s: %v", m, err)
@@ -251,7 +250,7 @@ func DoLoadImages(images []string, profiles []*config.Profile, cacheDir string, 
 				}
 				if err != nil {
 					failed = append(failed, m)
-					klog.Warningf("Failed to load cached images for profile %s. make sure the profile is running. %v", pName, err)
+					klog.Warningf("Failed to load cached images for %q: %v", pName, err)
 					continue
 				}
 				succeeded = append(succeeded, m)
@@ -259,8 +258,12 @@ func DoLoadImages(images []string, profiles []*config.Profile, cacheDir string, 
 		}
 	}
 
-	klog.Infof("succeeded pushing to: %s", strings.Join(succeeded, " "))
-	klog.Infof("failed pushing to: %s", strings.Join(failed, " "))
+	if len(succeeded) > 0 {
+		klog.Infof("succeeded pushing to: %s", strings.Join(succeeded, " "))
+	}
+	if len(failed) > 0 {
+		klog.Infof("failed pushing to: %s", strings.Join(failed, " "))
+	}
 	// Live pushes are not considered a failure
 	return nil
 }
@@ -309,6 +312,9 @@ func transferAndLoadImage(cr command.Runner, k8s config.KubernetesConfig, src st
 
 	err = r.LoadImage(dst)
 	if err != nil {
+		if strings.Contains(err.Error(), "ctr: image might be filtered out") {
+			out.WarningT("The image '{{.imageName}}' does not match arch of the container runtime, use a multi-arch image instead", out.V{"imageName": imgName})
+		}
 		return errors.Wrapf(err, "%s load %s", r.Name(), dst)
 	}
 
@@ -329,7 +335,7 @@ func removeExistingImage(r cruntime.Manager, src string, imgName string) error {
 	}
 
 	errStr := strings.ToLower(err.Error())
-	if !strings.Contains(errStr, "no such image") {
+	if !strings.Contains(errStr, "no such image") && !strings.Contains(errStr, "unable to remove the image") {
 		return errors.Wrap(err, "removing image")
 	}
 
@@ -338,11 +344,11 @@ func removeExistingImage(r cruntime.Manager, src string, imgName string) error {
 
 // SaveCachedImages saves from the container runtime to the cache
 func SaveCachedImages(cc *config.ClusterConfig, runner command.Runner, images []string, cacheDir string) error {
-	klog.Infof("SaveImages start: %s", images)
+	klog.Infof("SaveCachedImages start: %s", images)
 	start := time.Now()
 
 	defer func() {
-		klog.Infof("SaveImages completed in %s", time.Since(start))
+		klog.Infof("duration metric: took %s to SaveCachedImages", time.Since(start))
 	}()
 
 	var g errgroup.Group
@@ -466,9 +472,22 @@ func transferAndSaveImage(cr command.Runner, k8s config.KubernetesConfig, dst st
 	if err != nil {
 		return errors.Wrap(err, "runtime")
 	}
+	found := false
+	// the reason why we are doing this is that
+	// unlike other tool, podman assume the image has a localhost registry (not docker.io)
+	// if the image is loaded with a tarball without a registry specified in tag
+	// see https://github.com/containers/podman/issues/15974
+	tryImageExist := []string{imgName, cruntime.AddDockerIO(imgName), cruntime.AddLocalhostPrefix(imgName)}
+	for _, imgName = range tryImageExist {
+		if r.ImageExists(imgName, "") {
+			found = true
+			break
+		}
+	}
 
-	if !r.ImageExists(imgName, "") {
-		return errors.Errorf("image %s not found", imgName)
+	if !found {
+		// if all of this failed, return the original error
+		return fmt.Errorf("image not found %s", imgName)
 	}
 
 	klog.Infof("Saving image to: %s", dst)
@@ -509,11 +528,11 @@ func transferAndSaveImage(cr command.Runner, k8s config.KubernetesConfig, dst st
 
 // pullImages pulls images to the container run time
 func pullImages(cruntime cruntime.Manager, images []string) error {
-	klog.Infof("PullImages start: %s", images)
+	klog.Infof("pullImages start: %s", images)
 	start := time.Now()
 
 	defer func() {
-		klog.Infof("PullImages completed in %s", time.Since(start))
+		klog.Infof("duration metric: took %s to pullImages", time.Since(start))
 	}()
 
 	var g errgroup.Group
@@ -590,11 +609,11 @@ func PullImages(images []string, profile *config.Profile) error {
 
 // removeImages removes images from the container run time
 func removeImages(cruntime cruntime.Manager, images []string) error {
-	klog.Infof("RemovingImages start: %s", images)
+	klog.Infof("removeImages start: %s", images)
 	start := time.Now()
 
 	defer func() {
-		klog.Infof("RemovingImages completed in %s", time.Since(start))
+		klog.Infof("duration metric: took %s to removeImages", time.Since(start))
 	}()
 
 	var g errgroup.Group
@@ -686,7 +705,7 @@ func ListImages(profile *config.Profile, format string) error {
 		return errors.Wrapf(err, "error loading config for profile :%v", pName)
 	}
 
-	images := map[string]cruntime.ListImage{}
+	imageListsFromNodes := [][]cruntime.ListImage{}
 	for _, n := range c.Nodes {
 		m := config.MachineName(*c, n)
 
@@ -715,19 +734,12 @@ func ListImages(profile *config.Profile, format string) error {
 				klog.Warningf("Failed to list images for profile %s %v", pName, err.Error())
 				continue
 			}
+			imageListsFromNodes = append(imageListsFromNodes, list)
 
-			for _, img := range list {
-				if _, ok := images[img.ID]; !ok {
-					images[img.ID] = img
-				}
-			}
 		}
 	}
 
-	uniqueImages := []cruntime.ListImage{}
-	for _, img := range images {
-		uniqueImages = append(uniqueImages, img)
-	}
+	uniqueImages := mergeImageLists(imageListsFromNodes)
 
 	switch format {
 	case "table":
@@ -750,24 +762,57 @@ func ListImages(profile *config.Profile, format string) error {
 			klog.Warningf("Error marshalling images list: %v", err.Error())
 			return nil
 		}
-		fmt.Printf(string(json) + "\n")
+		fmt.Printf("%s\n", json)
 	case "yaml":
 		yaml, err := yaml.Marshal(uniqueImages)
 		if err != nil {
 			klog.Warningf("Error marshalling images list: %v", err.Error())
 			return nil
 		}
-		fmt.Printf(string(yaml) + "\n")
+		fmt.Printf("%s\n", yaml)
 	default:
 		res := []string{}
 		for _, item := range uniqueImages {
 			res = append(res, item.RepoTags...)
 		}
 		sort.Sort(sort.Reverse(sort.StringSlice(res)))
-		fmt.Printf(strings.Join(res, "\n") + "\n")
+		fmt.Printf("%s\n", strings.Join(res, "\n"))
 	}
 
 	return nil
+}
+
+// mergeImageLists merges image lists from different nodes into a single list
+// all the repo tags of the same image will be preserved and grouped in one image item
+func mergeImageLists(lists [][]cruntime.ListImage) []cruntime.ListImage {
+	images := map[string]*cruntime.ListImage{}
+	// key of this set is img.ID+img.repoTag
+	// we use this set to detect whether a tag of a image is included in images map
+	imageTagAndIDSet := map[string]struct{}{}
+	for _, list := range lists {
+		for _, img := range list {
+			img := img
+			_, existingImg := images[img.ID]
+			if !existingImg {
+				images[img.ID] = &img
+			}
+			for _, repoTag := range img.RepoTags {
+				if _, ok := imageTagAndIDSet[img.ID+repoTag]; ok {
+					continue
+				}
+				imageTagAndIDSet[img.ID+repoTag] = struct{}{}
+				if existingImg {
+					images[img.ID].RepoTags = append(images[img.ID].RepoTags, repoTag)
+				}
+			}
+		}
+
+	}
+	uniqueImages := []cruntime.ListImage{}
+	for _, img := range images {
+		uniqueImages = append(uniqueImages, *img)
+	}
+	return uniqueImages
 }
 
 // parseRepoTag splits input string for two parts: image name and image tag
@@ -868,11 +913,11 @@ func TagImage(profile *config.Profile, source string, target string) error {
 
 // pushImages pushes images from the container run time
 func pushImages(cruntime cruntime.Manager, images []string) error {
-	klog.Infof("PushImages start: %s", images)
+	klog.Infof("pushImages start: %s", images)
 	start := time.Now()
 
 	defer func() {
-		klog.Infof("PushImages completed in %s", time.Since(start))
+		klog.Infof("duration metric: took %s to pushImages", time.Since(start))
 	}()
 
 	var g errgroup.Group

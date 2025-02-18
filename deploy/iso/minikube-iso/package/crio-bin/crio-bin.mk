@@ -4,8 +4,8 @@
 #
 ################################################################################
 
-CRIO_BIN_VERSION = v1.24.1
-CRIO_BIN_COMMIT = a3bbde8a77c323aa6a485da9a9046299155c6016
+CRIO_BIN_VERSION = v1.29.1
+CRIO_BIN_COMMIT = 78e179ba8dd3ce462382a17049e8d1f770246af1
 CRIO_BIN_SITE = https://github.com/cri-o/cri-o/archive
 CRIO_BIN_SOURCE = $(CRIO_BIN_VERSION).tar.gz
 CRIO_BIN_DEPENDENCIES = host-go libgpgme
@@ -72,9 +72,6 @@ define CRIO_BIN_INSTALL_INIT_SYSTEMD
 	$(INSTALL) -Dm644 \
 		$(CRIO_BIN_PKGDIR)/crio.service \
 		$(TARGET_DIR)/usr/lib/systemd/system/crio.service
-	$(INSTALL) -Dm644 \
-		$(CRIO_BIN_PKGDIR)/crio-wipe.service \
-		$(TARGET_DIR)/usr/lib/systemd/system/crio-wipe.service
 	$(call link-service,crio.service)
 	$(call link-service,crio-shutdown.service)
 endef

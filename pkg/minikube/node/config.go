@@ -36,6 +36,7 @@ import (
 	"k8s.io/minikube/pkg/minikube/out/register"
 	"k8s.io/minikube/pkg/minikube/reason"
 	"k8s.io/minikube/pkg/minikube/style"
+	"k8s.io/minikube/pkg/util"
 	"k8s.io/minikube/pkg/util/lock"
 )
 
@@ -44,6 +45,7 @@ func showVersionInfo(k8sVersion string, cr cruntime.Manager) {
 	register.Reg.SetStep(register.PreparingKubernetes)
 	out.Step(cr.Style(), "Preparing Kubernetes {{.k8sVersion}} on {{.runtime}} {{.runtimeVersion}} ...", out.V{"k8sVersion": k8sVersion, "runtime": cr.Name(), "runtimeVersion": version})
 	for _, v := range config.DockerOpt {
+		v = util.MaskProxyPasswordWithKey(v)
 		out.Infof("opt {{.docker_option}}", out.V{"docker_option": v})
 	}
 	for _, v := range config.DockerEnv {
@@ -89,7 +91,7 @@ func configureMounts(wg *sync.WaitGroup, cc config.ClusterConfig) {
 	if err := mountCmd.Start(); err != nil {
 		exit.Error(reason.GuestMount, "Error starting mount", err)
 	}
-	if err := lock.WriteFile(filepath.Join(localpath.Profile(profile), constants.MountProcessFileName), []byte(strconv.Itoa(mountCmd.Process.Pid)), 0o644); err != nil {
+	if err := lock.AppendToFile(filepath.Join(localpath.Profile(profile), constants.MountProcessFileName), []byte(fmt.Sprintf(" %s", strconv.Itoa(mountCmd.Process.Pid))), 0o644); err != nil {
 		exit.Error(reason.HostMountPid, "Error writing mount pid", err)
 	}
 }

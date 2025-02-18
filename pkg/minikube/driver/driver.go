@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -56,12 +57,12 @@ const (
 	HyperKit = "hyperkit"
 	// VMware driver
 	VMware = "vmware"
-	// VMwareFusion driver (obsolete)
-	VMwareFusion = "vmwarefusion"
 	// HyperV driver
 	HyperV = "hyperv"
 	// Parallels driver
 	Parallels = "parallels"
+	// VFKit driver
+	VFKit = "vfkit"
 
 	// AliasKVM is driver name alias for kvm2
 	AliasKVM = "kvm"
@@ -188,6 +189,21 @@ func BareMetal(name string) bool {
 // IsSSH checks if the driver is ssh
 func IsSSH(name string) bool {
 	return name == SSH
+}
+
+// IsVirtualBox checks if the driver is VirtualBox
+func IsVirtualBox(name string) bool {
+	return name == VirtualBox
+}
+
+// IsVMware checks if the driver is VMware
+func IsVMware(name string) bool {
+	return name == VMware
+}
+
+// IsHyperV check if the driver is Hyper-V
+func IsHyperV(name string) bool {
+	return name == HyperV
 }
 
 // AllowsPreload returns if preload is allowed for the driver
@@ -341,12 +357,25 @@ func Suggest(options []registry.DriverState) (registry.DriverState, []registry.D
 // Status returns the status of a driver
 func Status(name string) registry.DriverState {
 	d := registry.Driver(name)
-	return registry.DriverState{
-		Name:     d.Name,
-		Default:  d.Default,
-		Priority: d.Priority,
-		State:    registry.Status(name),
+	stateChannel := make(chan registry.State)
+	timeoutChannel := time.After(20 * time.Second)
+	go func() {
+		stateChannel <- registry.Status(name)
+	}()
+	select {
+	case s := <-stateChannel:
+		return registry.DriverState{
+			Name:     d.Name,
+			Default:  d.Default,
+			Priority: d.Priority,
+			State:    s,
+		}
+	case <-timeoutChannel:
+		klog.Infof("time out when checking for status of %s driver", name)
+		return registry.DriverState{}
+
 	}
+
 }
 
 // IsAlias checks if an alias belongs to provided driver by name.

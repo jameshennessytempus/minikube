@@ -2,7 +2,7 @@
 title: "About the Benchmarking Process"
 linkTitle: "About the Benchmarking Process"
 weight: 1
---- 
+---
 
 ## What's the difference between the four images?
 In the benchmarking charts you'll see four images: Few Large Layers, Few Small Layers, Many Large Layers, and Many Small Layers
@@ -43,7 +43,7 @@ Between runs the cache and existing image is left alone, only the Go binary is c
 ```
 // Pseudo code of running docker-env benchmark
 
-startMininkube() // minikube start --container-runtime=docker
+startMinikube() // minikube start --container-runtime=docker
 
 for image in [fewLargeLayers, fewSmallLayers, ...] {
 	buildGoBinary()

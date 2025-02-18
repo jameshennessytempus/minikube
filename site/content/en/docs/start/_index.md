@@ -16,9 +16,42 @@ All you need is Docker (or similarly compatible) container or a Virtual Machine 
 * 2GB of free memory
 * 20GB of free disk space
 * Internet connection
-* Container or virtual machine manager, such as: [Docker]({{<ref "/docs/drivers/docker">}}), [Hyperkit]({{<ref "/docs/drivers/hyperkit">}}), [Hyper-V]({{<ref "/docs/drivers/hyperv">}}), [KVM]({{<ref "/docs/drivers/kvm2">}}), [Parallels]({{<ref "/docs/drivers/parallels">}}), [Podman]({{<ref "/docs/drivers/podman">}}), [VirtualBox]({{<ref "/docs/drivers/virtualbox">}}), or [VMware Fusion/Workstation]({{<ref "/docs/drivers/vmware">}})
+* Container or virtual machine manager, such as: [Docker]({{<ref "/docs/drivers/docker">}}), [QEMU]({{<ref "/docs/drivers/qemu">}}), [Hyperkit]({{<ref "/docs/drivers/hyperkit">}}), [Hyper-V]({{<ref "/docs/drivers/hyperv">}}), [KVM]({{<ref "/docs/drivers/kvm2">}}), [Parallels]({{<ref "/docs/drivers/parallels">}}), [Podman]({{<ref "/docs/drivers/podman">}}), [VirtualBox]({{<ref "/docs/drivers/virtualbox">}}), or [VMware Fusion/Workstation]({{<ref "/docs/drivers/vmware">}})
 
 <h2 class="step"><span class="fa-stack fa-1x"><i class="fa fa-circle fa-stack-2x"></i><strong class="fa-stack-1x text-primary">1</strong></span>Installation</h2>
+
+<script language="javascript">
+  const architectures = [
+    "Linux/x86-64",
+    "Linux/ARM64",
+    "Linux/ppc64",
+    "Linux/S390x",
+    "Linux/ARMv7",
+    "macOS/x86-64",
+    "macOS/ARM64",
+    "Windows/x86-64"
+  ];
+
+  console.time("timerReleaseFetch");
+  fetch('https://api.github.com/repos/kubernetes/minikube/releases')
+    .then((response) => response.json())
+    .then((releases) => {
+      console.timeEnd("timerReleaseFetch");
+      if (releases && releases.length > 0 && releases[0] && releases[0].tag_name) {
+        const isBetaMostRecent = releases[0].tag_name.includes("-beta");
+
+        if (isBetaMostRecent) {
+          for (architecture of architectures) {
+            const betaElement = document.querySelector(`button[data-quiz-id="/${architecture}/Beta"]`);
+            if (betaElement) {
+              betaElement.classList.remove("hide");
+            }
+          }
+        }
+      }
+    })
+    .catch(console.error);
+</script>
 
 {{% card %}}
 
@@ -33,7 +66,7 @@ Click on the buttons that describe your target platform. For other architectures
 {{% /quiz_row %}}
 
 {{% quiz_row base="/Linux/x86-64" name="Release type" %}}
-{{% quiz_button option="Stable" %}} {{% quiz_button option="Beta" %}}
+{{% quiz_button option="Stable" %}} {{% quiz_button option="Beta" hide="true" %}}
 {{% /quiz_row %}}
 
 {{% quiz_row base="/Linux/x86-64/Stable" name="Installer type" %}}
@@ -45,7 +78,7 @@ Click on the buttons that describe your target platform. For other architectures
 {{% /quiz_row %}}
 
 {{% quiz_row base="/Linux/ARM64" name="Release type" %}}
-{{% quiz_button option="Stable" %}} {{% quiz_button option="Beta" %}}
+{{% quiz_button option="Stable" %}} {{% quiz_button option="Beta" hide="true" %}}
 {{% /quiz_row %}}
 
 {{% quiz_row base="/Linux/ARM64/Stable" name="Installer type" %}}
@@ -57,7 +90,7 @@ Click on the buttons that describe your target platform. For other architectures
 {{% /quiz_row %}}
 
 {{% quiz_row base="/Linux/ppc64" name="Release type" %}}
-{{% quiz_button option="Stable" %}} {{% quiz_button option="Beta" %}}
+{{% quiz_button option="Stable" %}} {{% quiz_button option="Beta" hide="true" %}}
 {{% /quiz_row %}}
 
 {{% quiz_row base="/Linux/ppc64/Stable" name="Installer type" %}}
@@ -69,7 +102,7 @@ Click on the buttons that describe your target platform. For other architectures
 {{% /quiz_row %}}
 
 {{% quiz_row base="/Linux/S390x" name="Release type" %}}
-{{% quiz_button option="Stable" %}} {{% quiz_button option="Beta" %}}
+{{% quiz_button option="Stable" %}} {{% quiz_button option="Beta" hide="true" %}}
 {{% /quiz_row %}}
 
 {{% quiz_row base="/Linux/S390x/Stable" name="Installer type" %}}
@@ -81,7 +114,7 @@ Click on the buttons that describe your target platform. For other architectures
 {{% /quiz_row %}}
 
 {{% quiz_row base="/Linux/ARMv7" name="Release type" %}}
-{{% quiz_button option="Stable" %}} {{% quiz_button option="Beta" %}}
+{{% quiz_button option="Stable" %}} {{% quiz_button option="Beta" hide="true" %}}
 {{% /quiz_row %}}
 
 {{% quiz_row base="/Linux/ARMv7/Stable" name="Installer type" %}}
@@ -97,7 +130,7 @@ Click on the buttons that describe your target platform. For other architectures
 {{% /quiz_row %}}
 
 {{% quiz_row base="/macOS/x86-64" name="Release type" %}}
-{{% quiz_button option="Stable" %}} {{% quiz_button option="Beta" %}}
+{{% quiz_button option="Stable" %}} {{% quiz_button option="Beta" hide="true" %}}
 {{% /quiz_row %}}
 
 {{% quiz_row base="/macOS/x86-64/Stable" name="Installer type" %}}
@@ -109,7 +142,7 @@ Click on the buttons that describe your target platform. For other architectures
 {{% /quiz_row %}}
 
 {{% quiz_row base="/macOS/ARM64" name="Release type" %}}
-{{% quiz_button option="Stable" %}} {{% quiz_button option="Beta" %}}
+{{% quiz_button option="Stable" %}} {{% quiz_button option="Beta" hide="true" %}}
 {{% /quiz_row %}}
 
 {{% quiz_row base="/macOS/ARM64/Stable" name="Installer type" %}}
@@ -125,7 +158,7 @@ Click on the buttons that describe your target platform. For other architectures
 {{% /quiz_row %}}
 
 {{% quiz_row base="/Windows/x86-64" name="Release type" %}}
-{{% quiz_button option="Stable" %}} {{% quiz_button option="Beta" %}}
+{{% quiz_button option="Stable" %}} {{% quiz_button option="Beta" hide="true" %}}
 {{% /quiz_row %}}
 
 {{% quiz_row base="/Windows/x86-64/Stable" name="Installer type" %}}
@@ -138,8 +171,8 @@ Click on the buttons that describe your target platform. For other architectures
 
 {{% quiz_instruction id="/Linux/x86-64/Stable/Binary download" %}}
 ```shell
-curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
-sudo install minikube-linux-amd64 /usr/local/bin/minikube
+curl -LO https://github.com/kubernetes/minikube/releases/latest/download/minikube-linux-amd64
+sudo install minikube-linux-amd64 /usr/local/bin/minikube && rm minikube-linux-amd64
 ```
 {{% /quiz_instruction %}}
 
@@ -147,7 +180,7 @@ sudo install minikube-linux-amd64 /usr/local/bin/minikube
 ```shell
 r=https://api.github.com/repos/kubernetes/minikube/releases
 curl -LO $(curl -s $r | grep -o 'http.*download/v.*beta.*/minikube-linux-amd64' | head -n1)
-sudo install minikube-linux-amd64 /usr/local/bin/minikube
+sudo install minikube-linux-amd64 /usr/local/bin/minikube && rm minikube-linux-amd64
 ```
 {{% /quiz_instruction %}}
 
@@ -183,8 +216,8 @@ curl -L $u > minikube-beta.x86_64.rpm && sudo rpm -Uvh minikube-beta.x86_64.rpm
 
 {{% quiz_instruction id="/Linux/ARM64/Stable/Binary download" %}}
 ```shell
-curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-arm64
-sudo install minikube-linux-arm64 /usr/local/bin/minikube
+curl -LO https://github.com/kubernetes/minikube/releases/latest/download/minikube-linux-arm64
+sudo install minikube-linux-arm64 /usr/local/bin/minikube && rm minikube-linux-arm64
 ```
 {{% /quiz_instruction %}}
 
@@ -192,7 +225,7 @@ sudo install minikube-linux-arm64 /usr/local/bin/minikube
 ```shell
 r=https://api.github.com/repos/kubernetes/minikube/releases
 curl -LO $(curl -s $r | grep -o 'http.*download/v.*beta.*/minikube-linux-arm64' | head -n1)
-sudo install minikube-linux-arm64 /usr/local/bin/minikube
+sudo install minikube-linux-arm64 /usr/local/bin/minikube && rm minikube-linux-arm64
 ```
 {{% /quiz_instruction %}}
 
@@ -228,8 +261,8 @@ curl -L $u > minikube-beta.aarch64.rpm && sudo rpm -Uvh minikube-beta.aarch64.rp
 
 {{% quiz_instruction id="/Linux/ppc64/Stable/Binary download" %}}
 ```shell
-curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-ppc64le
-sudo install minikube-linux-ppc64le /usr/local/bin/minikube
+curl -LO https://github.com/kubernetes/minikube/releases/latest/download/minikube-linux-ppc64le
+sudo install minikube-linux-ppc64le /usr/local/bin/minikube && rm minikube-linux-ppc64le
 ```
 {{% /quiz_instruction %}}
 
@@ -237,7 +270,7 @@ sudo install minikube-linux-ppc64le /usr/local/bin/minikube
 ```shell
 r=https://api.github.com/repos/kubernetes/minikube/releases
 curl -LO $(curl -s $r | grep -o 'http.*download/v.*beta.*/minikube-linux-ppc64le' | head -n1)
-sudo install minikube-linux-ppc64le /usr/local/bin/minikube
+sudo install minikube-linux-ppc64le /usr/local/bin/minikube && rm minikube-linux-ppc64le
 ```
 {{% /quiz_instruction %}}
 
@@ -273,8 +306,8 @@ curl -L $u > minikube-beta.ppc64el.rpm && sudo rpm -Uvh minikube-beta.ppc64el.rp
 
 {{% quiz_instruction id="/Linux/S390x/Stable/Binary download" %}}
 ```shell
-curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-s390x
-sudo install minikube-linux-s390x /usr/local/bin/minikube
+curl -LO https://github.com/kubernetes/minikube/releases/latest/download/minikube-linux-s390x
+sudo install minikube-linux-s390x /usr/local/bin/minikube && rm minikube-linux-s390x
 ```
 {{% /quiz_instruction %}}
 
@@ -282,7 +315,7 @@ sudo install minikube-linux-s390x /usr/local/bin/minikube
 ```shell
 r=https://api.github.com/repos/kubernetes/minikube/releases
 curl -LO $(curl -s $r | grep -o 'http.*download/v.*beta.*/minikube-linux-s390x' | head -n1)
-sudo install minikube-linux-s390x /usr/local/bin/minikube
+sudo install minikube-linux-s390x /usr/local/bin/minikube && rm minikube-linux-s390x
 ```
 {{% /quiz_instruction %}}
 
@@ -318,8 +351,8 @@ curl -L $u > minikube-beta.s390x.rpm && sudo rpm -Uvh minikube-beta.s390x.rpm
 
 {{% quiz_instruction id="/Linux/ARMv7/Stable/Binary download" %}}
 ```shell
-curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-arm
-sudo install minikube-linux-arm /usr/local/bin/minikube
+curl -LO https://github.com/kubernetes/minikube/releases/latest/download/minikube-linux-arm
+sudo install minikube-linux-arm /usr/local/bin/minikube && rm minikube-linux-arm
 ```
 {{% /quiz_instruction %}}
 
@@ -327,7 +360,7 @@ sudo install minikube-linux-arm /usr/local/bin/minikube
 ```shell
 r=https://api.github.com/repos/kubernetes/minikube/releases
 curl -LO $(curl -s $r | grep -o 'http.*download/v.*beta.*/minikube-linux-arm' | head -n1)
-sudo install minikube-linux-arm /usr/local/bin/minikube
+sudo install minikube-linux-arm /usr/local/bin/minikube && rm minikube-linux-arm
 ```
 {{% /quiz_instruction %}}
 
@@ -378,7 +411,7 @@ brew link minikube
 
 {{% quiz_instruction id="/macOS/x86-64/Stable/Binary download" %}}
 ```shell
-curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-darwin-amd64
+curl -LO https://github.com/kubernetes/minikube/releases/latest/download/minikube-darwin-amd64
 sudo install minikube-darwin-amd64 /usr/local/bin/minikube
 ```
 {{% /quiz_instruction %}}
@@ -393,7 +426,7 @@ sudo install minikube-darwin-amd64 /usr/local/bin/minikube
 
 {{% quiz_instruction id="/macOS/ARM64/Stable/Binary download" %}}
 ```shell
-curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-darwin-arm64
+curl -LO https://github.com/kubernetes/minikube/releases/latest/download/minikube-darwin-arm64
 sudo install minikube-darwin-arm64 /usr/local/bin/minikube
 ```
 {{% /quiz_instruction %}}
@@ -425,7 +458,7 @@ sudo install minikube-darwin-arm64 /usr/local/bin/minikube
 If the [Windows Package Manager](https://docs.microsoft.com/en-us/windows/package-manager/) is installed, use the following command to install minikube:
 
 ```shell
-winget install minikube
+winget install Kubernetes.minikube
 ```
 {{% /quiz_instruction %}}
 
@@ -451,8 +484,8 @@ choco install minikube
     _Make sure to run PowerShell as Administrator._
     ```powershell
     $oldPath = [Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::Machine)
-    if ($oldPath.Split(';') -inotcontains 'C:\minikube'){ `
-      [Environment]::SetEnvironmentVariable('Path', $('{0};C:\minikube' -f $oldPath), [EnvironmentVariableTarget]::Machine) `
+    if ($oldPath.Split(';') -inotcontains 'C:\minikube'){
+      [Environment]::SetEnvironmentVariable('Path', $('{0};C:\minikube' -f $oldPath), [EnvironmentVariableTarget]::Machine)
     }
     ```
     <span style="color:blue">
@@ -476,8 +509,8 @@ choco install minikube
     _Make sure to run PowerShell as Administrator._
     ```powershell
     $oldPath = [Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::Machine)
-    if ($oldPath.Split(';') -inotcontains 'C:\minikube'){ `
-      [Environment]::SetEnvironmentVariable('Path', $('{0};C:\minikube' -f $oldPath), [EnvironmentVariableTarget]::Machine) `
+    if ($oldPath.Split(';') -inotcontains 'C:\minikube'){
+      [Environment]::SetEnvironmentVariable('Path', $('{0};C:\minikube' -f $oldPath), [EnvironmentVariableTarget]::Machine)
     }
     ```
     _If you used a CLI to perform the installation, you will need to close that CLI and open a new one before proceeding._
@@ -510,7 +543,7 @@ If minikube fails to start, see the [drivers page]({{<ref "/docs/drivers">}}) fo
 
 <h2 class="step"><span class="fa-stack fa-1x"><i class="fa fa-circle fa-stack-2x"></i><strong class="fa-stack-1x text-primary">3</strong></span>Interact with your cluster</h2>
 
-If you already have kubectl installed, you can now use it to access your shiny new cluster:
+If you already have kubectl installed (see [documentation](https://kubernetes.io/docs/tasks/tools/install-kubectl/)), you can now use it to access your shiny new cluster:
 
 ```shell
 kubectl get po -A
@@ -521,7 +554,7 @@ Alternatively, minikube can download the appropriate version of kubectl and you 
 ```shell
 minikube kubectl -- get po -A
 ```
-You can also make your life easier by adding the following to your shell config:
+You can also make your life easier by adding the following to your shell config: (for more details see: [kubectl]({{<ref "/docs/handbook/kubectl">}}))
 ```shell
 alias kubectl="minikube kubectl --"
 ```
@@ -534,11 +567,13 @@ minikube dashboard
 
 <h2 class="step"><span class="fa-stack fa-1x"><i class="fa fa-circle fa-stack-2x"></i><strong class="fa-stack-1x text-primary">4</strong></span>Deploy applications</h2>
 
-Create a sample deployment and expose it on port 80:
+{{% tabs %}}
+{{% tab Service %}}
+Create a sample deployment and expose it on port 8080:
 
 ```shell
-kubectl create deployment hello-minikube --image=docker.io/nginx:1.23
-kubectl expose deployment hello-minikube --type=NodePort --port=80
+kubectl create deployment hello-minikube --image=kicbase/echo-server:1.0
+kubectl expose deployment hello-minikube --type=NodePort --port=8080
 ```
 
 It may take a moment, but your deployment will soon show up when you run:
@@ -556,20 +591,19 @@ minikube service hello-minikube
 Alternatively, use kubectl to forward the port:
 
 ```shell
-kubectl port-forward service/hello-minikube 7080:80
+kubectl port-forward service/hello-minikube 7080:8080
 ```
 
 Tada! Your application is now available at [http://localhost:7080/](http://localhost:7080/).
 
-You should be able to see the request metadata from nginx such as the `CLIENT VALUES`, `SERVER VALUES`, `HEADERS RECEIVED` and the `BODY` in the application output. Try changing the path of the request and observe the changes in the `CLIENT VALUES`. Similarly, you can do a POST request to the same and observe the body show up in `BODY` section of the output.
-
-### LoadBalancer deployments
-
+You should be able to see the request metadata in the application output. Try changing the path of the request and observe the changes. Similarly, you can do a POST request and observe the body show up in the output.
+{{% /tab %}}
+{{% tab LoadBalancer %}}
 To access a LoadBalancer deployment, use the "minikube tunnel" command. Here is an example deployment:
 
 ```shell
-kubectl create deployment balanced --image=docker.io/nginx:1.23
-kubectl expose deployment balanced --type=LoadBalancer --port=80
+kubectl create deployment balanced --image=kicbase/echo-server:1.0
+kubectl expose deployment balanced --type=LoadBalancer --port=8080
 ```
 
 In another window, start the tunnel to create a routable IP for the 'balanced' deployment:
@@ -584,7 +618,111 @@ To find the routable IP, run this command and examine the `EXTERNAL-IP` column:
 kubectl get services balanced
 ```
 
-Your deployment is now available at &lt;EXTERNAL-IP&gt;:80
+Your deployment is now available at &lt;EXTERNAL-IP&gt;:8080
+{{% /tab %}}
+{{% tab Ingress %}}
+Enable ingress addon:
+```shell
+minikube addons enable ingress
+```
+
+The following example creates simple echo-server services and an Ingress object to route to these services.
+```shell
+kind: Pod
+apiVersion: v1
+metadata:
+  name: foo-app
+  labels:
+    app: foo
+spec:
+  containers:
+    - name: foo-app
+      image: 'kicbase/echo-server:1.0'
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: foo-service
+spec:
+  selector:
+    app: foo
+  ports:
+    - port: 8080
+---
+kind: Pod
+apiVersion: v1
+metadata:
+  name: bar-app
+  labels:
+    app: bar
+spec:
+  containers:
+    - name: bar-app
+      image: 'kicbase/echo-server:1.0'
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: bar-service
+spec:
+  selector:
+    app: bar
+  ports:
+    - port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: example-ingress
+spec:
+  rules:
+    - http:
+        paths:
+          - pathType: Prefix
+            path: /foo
+            backend:
+              service:
+                name: foo-service
+                port:
+                  number: 8080
+          - pathType: Prefix
+            path: /bar
+            backend:
+              service:
+                name: bar-service
+                port:
+                  number: 8080
+---
+```
+
+Apply the contents
+```shell
+kubectl apply -f https://storage.googleapis.com/minikube-site-examples/ingress-example.yaml
+```
+
+Wait for ingress address
+```shell
+kubectl get ingress
+NAME              CLASS   HOSTS   ADDRESS          PORTS   AGE
+example-ingress   nginx   *       <your_ip_here>   80      5m45s
+```
+
+**Note for Docker Desktop Users:**
+<br>
+To get ingress to work you'll need to open a new terminal window and run `minikube tunnel` and in the following step use `127.0.0.1` in place of `<ip_from_above>`.
+
+Now verify that the ingress works
+```shell
+$ curl <ip_from_above>/foo
+Request served by foo-app
+...
+
+$ curl <ip_from_above>/bar
+Request served by bar-app
+...
+```
+{{% /tab %}}
+{{% /tabs %}}
 
 <h2 class="step"><span class="fa-stack fa-1x"><i class="fa fa-circle fa-stack-2x"></i><strong class="fa-stack-1x text-primary">5</strong></span>Manage your cluster</h2>
 

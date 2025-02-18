@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -31,12 +32,15 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/blang/semver/v4"
 	retryablehttp "github.com/hashicorp/go-retryablehttp"
+	core "k8s.io/api/core/v1"
 	"k8s.io/minikube/pkg/kapi"
+	"k8s.io/minikube/pkg/minikube/constants"
 	"k8s.io/minikube/pkg/minikube/detect"
 	"k8s.io/minikube/pkg/util/retry"
 )
@@ -46,6 +50,26 @@ func TestAddons(t *testing.T) {
 	profile := UniqueProfileName("addons")
 	ctx, cancel := context.WithTimeout(context.Background(), Minutes(40))
 	defer Cleanup(t, profile, cancel)
+
+	t.Run("PreSetup", func(t *testing.T) {
+		tests := []struct {
+			name      string
+			validator validateFunc
+		}{
+			{"EnablingAddonOnNonExistingCluster", validateEnablingAddonOnNonExistingCluster},
+			{"DisablingAddonOnNonExistingCluster", validateDisablingAddonOnNonExistingCluster},
+		}
+		for _, tc := range tests {
+			tc := tc
+			if ctx.Err() == context.DeadlineExceeded {
+				t.Fatalf("Unable to run more tests (deadline exceeded)")
+			}
+			t.Run(tc.name, func(t *testing.T) {
+				MaybeParallel(t)
+				tc.validator(ctx, t, profile)
+			})
+		}
+	})
 
 	setupSucceeded := t.Run("Setup", func(t *testing.T) {
 		// Set an env var to point to our dummy credentials file
@@ -66,12 +90,19 @@ func TestAddons(t *testing.T) {
 			t.Fatalf("Failed setting GOOGLE_CLOUD_PROJECT env var: %v", err)
 		}
 
-		args := append([]string{"start", "-p", profile, "--wait=true", "--memory=4000", "--alsologtostderr", "--addons=registry", "--addons=metrics-server", "--addons=volumesnapshots", "--addons=csi-hostpath-driver", "--addons=gcp-auth", "--addons=cloud-spanner"}, StartArgs()...)
-		if !NoneDriver() { // none driver does not support ingress
-			args = append(args, "--addons=ingress", "--addons=ingress-dns")
-		}
-		if !arm64Platform() {
-			args = append(args, "--addons=helm-tiller")
+		// MOCK_GOOGLE_TOKEN forces the gcp-auth webhook to use a mock token instead of trying to get a valid one from the credentials.
+		os.Setenv("MOCK_GOOGLE_TOKEN", "true")
+
+		// for some reason, (Docker_Cloud_Shell) sets 'MINIKUBE_FORCE_SYSTEMD=true' while having cgroupfs set in docker (and probably os itself), which might make it unstable and occasionally fail:
+		// - I1226 15:05:24.834294   11286 out.go:177]   - MINIKUBE_FORCE_SYSTEMD=true
+		// - I1226 15:05:25.070037   11286 info.go:266] docker info: {... CgroupDriver:cgroupfs ...}
+		// ref: https://storage.googleapis.com/minikube-builds/logs/15463/27154/Docker_Cloud_Shell.html
+		// so we override that here to let minikube auto-detect appropriate cgroup driver
+		os.Setenv(constants.MinikubeForceSystemdEnv, "")
+
+		args := append([]string{"start", "-p", profile, "--wait=true", "--memory=4000", "--alsologtostderr", "--addons=registry", "--addons=metrics-server", "--addons=volumesnapshots", "--addons=csi-hostpath-driver", "--addons=gcp-auth", "--addons=cloud-spanner", "--addons=inspektor-gadget", "--addons=nvidia-device-plugin", "--addons=yakd", "--addons=volcano", "--addons=amd-gpu-device-plugin"}, StartArgs()...)
+		if !NoneDriver() {
+			args = append(args, "--addons=ingress", "--addons=ingress-dns", "--addons=storage-provisioner-rancher")
 		}
 		rr, err := Run(t, exec.CommandContext(ctx, Target(), args...))
 		if err != nil {
@@ -84,39 +115,14 @@ func TestAddons(t *testing.T) {
 		t.Fatalf("Failed setup for addon tests")
 	}
 
-	// Parallelized tests
-	t.Run("parallel", func(t *testing.T) {
-		tests := []struct {
-			name      string
-			validator validateFunc
-		}{
-			{"Registry", validateRegistryAddon},
-			{"Ingress", validateIngressAddon},
-			{"MetricsServer", validateMetricsServerAddon},
-			{"HelmTiller", validateHelmTillerAddon},
-			{"Olm", validateOlmAddon},
-			{"CSI", validateCSIDriverAndSnapshots},
-			{"Headlamp", validateHeadlampAddon},
-			{"CloudSpanner", validateCloudSpannerAddon},
-		}
-		for _, tc := range tests {
-			tc := tc
-			if ctx.Err() == context.DeadlineExceeded {
-				t.Fatalf("Unable to run more tests (deadline exceeded)")
-			}
-			t.Run(tc.name, func(t *testing.T) {
-				MaybeParallel(t)
-				tc.validator(ctx, t, profile)
-			})
-		}
-	})
-
-	// Run other tests after to avoid collision
+	type TestCase = struct {
+		name      string
+		validator validateFunc
+	}
+	// Run tests in serial to avoid collision
 	t.Run("serial", func(t *testing.T) {
-		tests := []struct {
-			name      string
-			validator validateFunc
-		}{
+		tests := []TestCase{
+			{"Volcano", validateVolcanoAddon},
 			{"GCPAuth", validateGCPAuthAddon},
 		}
 		for _, tc := range tests {
@@ -125,6 +131,35 @@ func TestAddons(t *testing.T) {
 				t.Fatalf("Unable to run more tests (deadline exceeded)")
 			}
 			t.Run(tc.name, func(t *testing.T) {
+				tc.validator(ctx, t, profile)
+			})
+		}
+	})
+
+	// Parallelized tests
+	t.Run("parallel", func(t *testing.T) {
+		tests := []TestCase{
+			{"Registry", validateRegistryAddon},
+			{"Ingress", validateIngressAddon},
+			{"InspektorGadget", validateInspektorGadgetAddon},
+			{"MetricsServer", validateMetricsServerAddon},
+			{"Olm", validateOlmAddon},
+			{"CSI", validateCSIDriverAndSnapshots},
+			{"Headlamp", validateHeadlampAddon},
+			{"CloudSpanner", validateCloudSpannerAddon},
+			{"LocalPath", validateLocalPathAddon},
+			{"NvidiaDevicePlugin", validateNvidiaDevicePlugin},
+			{"Yakd", validateYakdAddon},
+			{"AmdGpuDevicePlugin", validateAmdGpuDevicePlugin},
+		}
+
+		for _, tc := range tests {
+			tc := tc
+			if ctx.Err() == context.DeadlineExceeded {
+				t.Fatalf("Unable to run more tests (deadline exceeded)")
+			}
+			t.Run(tc.name, func(t *testing.T) {
+				MaybeParallel(t)
 				tc.validator(ctx, t, profile)
 			})
 		}
@@ -144,15 +179,22 @@ func TestAddons(t *testing.T) {
 		if err != nil {
 			t.Errorf("failed to disable dashboard addon: args %q : %v", rr.Command(), err)
 		}
+		// Disable a non-enabled addon
+		rr, err = Run(t, exec.CommandContext(ctx, Target(), "addons", "disable", "gvisor", "-p", profile))
+		if err != nil {
+			t.Errorf("failed to disable non-enabled addon: args %q : %v", rr.Command(), err)
+		}
 	})
 }
 
 // validateIngressAddon tests the ingress addon by deploying a default nginx pod
 func validateIngressAddon(ctx context.Context, t *testing.T, profile string) {
-	defer PostMortemLogs(t, profile)
 	if NoneDriver() {
 		t.Skipf("skipping: ingress not supported")
 	}
+	defer disableAddon(t, "ingress", profile)
+	defer disableAddon(t, "ingress-dns", profile)
+	defer PostMortemLogs(t, profile)
 
 	client, err := kapi.Client(profile)
 	if err != nil {
@@ -171,12 +213,17 @@ func validateIngressAddon(ctx context.Context, t *testing.T, profile string) {
 	ingressYaml := "nginx-ingress-v1.yaml"
 	ingressDNSYaml := "ingress-dns-example-v1.yaml"
 	v, err := client.ServerVersion()
-	if err != nil {
+	if err == nil {
+		// for pre-release k8s version, remove any "+" suffix in minor version to be semver-compliant and not panic
+		// ref: https://github.com/kubernetes/minikube/pull/16145#issuecomment-1483283260
+		minor := strings.TrimSuffix(v.Minor, "+")
+		if semver.MustParseRange("<1.19.0")(semver.MustParse(fmt.Sprintf("%s.%s.0", v.Major, minor))) {
+			// legacy: k8s < v1.19 & ingress api v1beta1
+			ingressYaml = "nginx-ingress-v1beta1.yaml"
+			ingressDNSYaml = "ingress-dns-example-v1beta1.yaml"
+		}
+	} else {
 		t.Log("failed to get k8s version, assuming v1.19+ => ingress api v1")
-	} else if semver.MustParseRange("<1.19.0")(semver.MustParse(fmt.Sprintf("%s.%s.0", v.Major, v.Minor))) {
-		// legacy: k8s < v1.19 & ingress api v1beta1
-		ingressYaml = "nginx-ingress-v1beta1.yaml"
-		ingressDNSYaml = "ingress-dns-example-v1beta1.yaml"
 	}
 
 	// create networking.k8s.io/v1 ingress
@@ -255,20 +302,11 @@ func validateIngressAddon(ctx context.Context, t *testing.T, profile string) {
 	if !strings.Contains(rr.Stdout.String(), ip) {
 		t.Errorf("unexpected output from nslookup. stdout: %v\nstderr: %v", rr.Stdout.String(), rr.Stderr.String())
 	}
-
-	rr, err = Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "addons", "disable", "ingress-dns", "--alsologtostderr", "-v=1"))
-	if err != nil {
-		t.Errorf("failed to disable ingress-dns addon. args %q : %v", rr.Command(), err)
-	}
-
-	rr, err = Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "addons", "disable", "ingress", "--alsologtostderr", "-v=1"))
-	if err != nil {
-		t.Errorf("failed to disable ingress addon. args %q : %v", rr.Command(), err)
-	}
 }
 
 // validateRegistryAddon tests the registry addon
 func validateRegistryAddon(ctx context.Context, t *testing.T, profile string) {
+	defer disableAddon(t, "registry", profile)
 	defer PostMortemLogs(t, profile)
 
 	client, err := kapi.Client(profile)
@@ -277,8 +315,8 @@ func validateRegistryAddon(ctx context.Context, t *testing.T, profile string) {
 	}
 
 	start := time.Now()
-	if err := kapi.WaitForRCToStabilize(client, "kube-system", "registry", Minutes(6)); err != nil {
-		t.Errorf("failed waiting for registry replicacontroller to stabilize: %v", err)
+	if err := kapi.WaitForDeploymentToStabilize(client, "kube-system", "registry", Minutes(6)); err != nil {
+		t.Errorf("failed waiting for registry deployment to stabilize: %v", err)
 	}
 	t.Logf("registry stabilized in %s", time.Since(start))
 
@@ -337,15 +375,11 @@ func validateRegistryAddon(ctx context.Context, t *testing.T, profile string) {
 	if err := retry.Expo(checkExternalAccess, 500*time.Millisecond, Seconds(150)); err != nil {
 		t.Errorf("failed to check external access to %s: %v", u.String(), err.Error())
 	}
-
-	rr, err = Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "addons", "disable", "registry", "--alsologtostderr", "-v=1"))
-	if err != nil {
-		t.Errorf("failed to disable registry addon. args %q: %v", rr.Command(), err)
-	}
 }
 
 // validateMetricsServerAddon tests the metrics server addon by making sure "kubectl top pods" returns a sensible result
 func validateMetricsServerAddon(ctx context.Context, t *testing.T, profile string) {
+	defer disableAddon(t, "metrics-server", profile)
 	defer PostMortemLogs(t, profile)
 
 	client, err := kapi.Client(profile)
@@ -381,74 +415,12 @@ func validateMetricsServerAddon(ctx context.Context, t *testing.T, profile strin
 	if err := retry.Expo(checkMetricsServer, time.Second*3, Minutes(6)); err != nil {
 		t.Errorf("failed checking metric server: %v", err.Error())
 	}
-
-	rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "addons", "disable", "metrics-server", "--alsologtostderr", "-v=1"))
-	if err != nil {
-		t.Errorf("failed to disable metrics-server addon: args %q: %v", rr.Command(), err)
-	}
-}
-
-// validateHelmTillerAddon tests the helm tiller addon by running "helm version" inside the cluster
-func validateHelmTillerAddon(ctx context.Context, t *testing.T, profile string) {
-
-	defer PostMortemLogs(t, profile)
-
-	if arm64Platform() {
-		t.Skip("skip Helm test on arm64")
-	}
-
-	client, err := kapi.Client(profile)
-	if err != nil {
-		t.Fatalf("failed to get Kubernetes client for %s: %v", profile, err)
-	}
-
-	start := time.Now()
-	if err := kapi.WaitForDeploymentToStabilize(client, "kube-system", "tiller-deploy", Minutes(6)); err != nil {
-		t.Errorf("failed waiting for tiller-deploy deployment to stabilize: %v", err)
-	}
-	t.Logf("tiller-deploy stabilized in %s", time.Since(start))
-
-	if _, err := PodWait(ctx, t, profile, "kube-system", "app=helm", Minutes(6)); err != nil {
-		t.Fatalf("failed waiting for helm pod: %v", err)
-	}
-
-	if NoneDriver() {
-		_, err := exec.LookPath("socat")
-		if err != nil {
-			t.Skipf("socat is required by kubectl to complete this test")
-		}
-	}
-
-	want := "Server: &version.Version"
-	// Test from inside the cluster (`helm version` use pod.list permission.)
-	checkHelmTiller := func() error {
-
-		rr, err := Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "run", "--rm", "helm-test", "--restart=Never", "--image=alpine/helm:2.16.3", "-it", "--namespace=kube-system", "--", "version"))
-		if err != nil {
-			return err
-		}
-		if rr.Stderr.String() != "" {
-			t.Logf("%v: unexpected stderr: %s", rr.Command(), rr.Stderr)
-		}
-		if !strings.Contains(rr.Stdout.String(), want) {
-			return fmt.Errorf("%v stdout = %q, want %q", rr.Command(), rr.Stdout, want)
-		}
-		return nil
-	}
-
-	if err := retry.Expo(checkHelmTiller, 500*time.Millisecond, Minutes(2)); err != nil {
-		t.Errorf("failed checking helm tiller: %v", err.Error())
-	}
-
-	rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "addons", "disable", "helm-tiller", "--alsologtostderr", "-v=1"))
-	if err != nil {
-		t.Errorf("failed disabling helm-tiller addon. arg %q.s %v", rr.Command(), err)
-	}
 }
 
 // validateOlmAddon tests the OLM addon
 func validateOlmAddon(ctx context.Context, t *testing.T, profile string) {
 	t.Skip("Skipping OLM addon test until https://github.com/operator-framework/operator-lifecycle-manager/issues/2534 is resolved")
+	defer disableAddon(t, "olm", profile)
 	defer PostMortemLogs(t, profile)
 	start := time.Now()
 
@@ -500,6 +472,8 @@ func validateOlmAddon(ctx context.Context, t *testing.T, profile string) {
 
 // validateCSIDriverAndSnapshots tests the csi hostpath driver by creating a persistent volume, snapshotting it and restoring it.
 func validateCSIDriverAndSnapshots(ctx context.Context, t *testing.T, profile string) {
+	defer disableAddon(t, "csi-hostpath-driver", profile)
+	defer disableAddon(t, "volumesnapshots", profile)
 	defer PostMortemLogs(t, profile)
 
 	client, err := kapi.Client(profile)
@@ -588,116 +562,150 @@ func validateCSIDriverAndSnapshots(ctx context.Context, t *testing.T, profile st
 	if err != nil {
 		t.Logf("cleanup with %s failed: %v", rr.Command(), err)
 	}
-	rr, err = Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "addons", "disable", "csi-hostpath-driver", "--alsologtostderr", "-v=1"))
+}
+
+// validateGCPAuthNamespaces validates that newly created namespaces contain the gcp-auth secret.
+func validateGCPAuthNamespaces(ctx context.Context, t *testing.T, profile string) {
+	rr, err := Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "create", "ns", "new-namespace"))
 	if err != nil {
-		t.Errorf("failed to disable csi-hostpath-driver addon: args %q: %v", rr.Command(), err)
+		t.Fatalf("%s failed: %v", rr.Command(), err)
 	}
-	rr, err = Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "addons", "disable", "volumesnapshots", "--alsologtostderr", "-v=1"))
-	if err != nil {
-		t.Errorf("failed to disable volumesnapshots addon: args %q: %v", rr.Command(), err)
+
+	logsAsError := func() error {
+		rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "logs", "-l", "app=gcp-auth", "-n", "gcp-auth"))
+		if err != nil {
+			return err
+		}
+		return errors.New(rr.Output())
+	}
+
+	getSecret := func() error {
+		_, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "get", "secret", "gcp-auth", "-n", "new-namespace"))
+		if err != nil {
+			err = fmt.Errorf("%w: gcp-auth container logs: %v", err, logsAsError())
+		}
+		return err
+	}
+
+	if err := retry.Expo(getSecret, Seconds(2), Minutes(1)); err != nil {
+		t.Errorf("failed to get secret: %v", err)
 	}
 }
 
 // validateGCPAuthAddon tests the GCP Auth addon with either phony or real credentials and makes sure the files are mounted into pods correctly
 func validateGCPAuthAddon(ctx context.Context, t *testing.T, profile string) {
+	defer func() {
+		disableGCPAuth := func() error {
+			disableAddon(t, "gcp-auth", profile)
+			return nil
+		}
+		if err := retry.Expo(disableGCPAuth, Minutes(2), Minutes(10), 5); err != nil {
+			t.Errorf("failed to disable GCP auth addon: %v", err)
+		}
+	}()
 	defer PostMortemLogs(t, profile)
 
-	// schedule a pod to check environment variables
-	rr, err := Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "create", "-f", filepath.Join(*testdataDir, "busybox.yaml")))
-	if err != nil {
-		t.Fatalf("%s failed: %v", rr.Command(), err)
-	}
+	t.Run("Namespaces", func(t *testing.T) {
+		validateGCPAuthNamespaces(ctx, t, profile)
+	})
 
-	serviceAccountName := "gcp-auth-test"
-	// create a dummy service account so we know the pull secret got added
-	rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "create", "sa", serviceAccountName))
-	if err != nil {
-		t.Fatalf("%s failed: %v", rr.Command(), err)
-	}
-
-	// 8 minutes, because 4 is not enough for images to pull in all cases.
-	names, err := PodWait(ctx, t, profile, "default", "integration-test=busybox", Minutes(8))
-	if err != nil {
-		t.Fatalf("wait: %v", err)
-	}
-
-	// Use this pod to confirm that the env vars are set correctly
-	rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "exec", names[0], "--", "/bin/sh", "-c", "printenv GOOGLE_APPLICATION_CREDENTIALS"))
-	if err != nil {
-		t.Fatalf("printenv creds: %v", err)
-	}
-
-	got := strings.TrimSpace(rr.Stdout.String())
-	expected := "/google-app-creds.json"
-	if got != expected {
-		t.Errorf("'printenv GOOGLE_APPLICATION_CREDENTIALS' returned %s, expected %s", got, expected)
-	}
-
-	// Now check the service account and make sure the "gcp-auth" image pull secret is present
-	rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "describe", "sa", serviceAccountName))
-	if err != nil {
-		t.Fatalf("%s failed: %v", rr.Command(), err)
-	}
-
-	expectedPullSecret := "gcp-auth"
-	re := regexp.MustCompile(`.*Image pull secrets:.*`)
-	secrets := re.FindString(rr.Stdout.String())
-	if !strings.Contains(secrets, expectedPullSecret) {
-		t.Errorf("Unexpected image pull secrets. expected %s, got %s", expectedPullSecret, secrets)
-	}
-
-	if !detect.IsOnGCE() || detect.IsCloudShell() {
-		// Make sure the file contents are correct
-		rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "exec", names[0], "--", "/bin/sh", "-c", "cat /google-app-creds.json"))
+	t.Run("FakeCredentials", func(t *testing.T) {
+		// schedule a pod to check environment variables
+		rr, err := Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "create", "-f", filepath.Join(*testdataDir, "busybox.yaml")))
 		if err != nil {
-			t.Fatalf("cat creds: %v", err)
+			t.Fatalf("%s failed: %v", rr.Command(), err)
 		}
 
-		var gotJSON map[string]string
-		err = json.Unmarshal(bytes.TrimSpace(rr.Stdout.Bytes()), &gotJSON)
+		serviceAccountName := "gcp-auth-test"
+		// create a dummy service account so we know the pull secret got added
+		rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "create", "sa", serviceAccountName))
 		if err != nil {
-			t.Fatalf("unmarshal json: %v", err)
-		}
-		expectedJSON := map[string]string{
-			"client_id":        "haha",
-			"client_secret":    "nice_try",
-			"quota_project_id": "this_is_fake",
-			"refresh_token":    "maybe_next_time",
-			"type":             "authorized_user",
+			t.Fatalf("%s failed: %v", rr.Command(), err)
 		}
 
-		if !reflect.DeepEqual(gotJSON, expectedJSON) {
-			t.Fatalf("unexpected creds file: got %v, expected %v", gotJSON, expectedJSON)
-		}
-	}
-
-	// Check the GOOGLE_CLOUD_PROJECT env var as well
-	rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "exec", names[0], "--", "/bin/sh", "-c", "printenv GOOGLE_CLOUD_PROJECT"))
-	if err != nil {
-		t.Fatalf("print env project: %v", err)
-	}
-
-	got = strings.TrimSpace(rr.Stdout.String())
-	expected = "this_is_fake"
-
-	if got != expected {
-		t.Errorf("'printenv GOOGLE_CLOUD_PROJECT' returned %s, expected %s", got, expected)
-	}
-
-	disableGCPAuth := func() error {
-		_, err = Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "addons", "disable", "gcp-auth", "--alsologtostderr", "-v=1"))
+		// 8 minutes, because 4 is not enough for images to pull in all cases.
+		names, err := PodWait(ctx, t, profile, "default", "integration-test=busybox", Minutes(8))
 		if err != nil {
-			return err
+			t.Fatalf("wait: %v", err)
 		}
-		return nil
-	}
 
-	if err := retry.Expo(disableGCPAuth, Minutes(2), Minutes(10), 5); err != nil {
-		t.Errorf("failed to disable GCP auth addon: %v", err)
-	}
+		// Use this pod to confirm that the env vars are set correctly
+		rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "exec", names[0], "--", "/bin/sh", "-c", "printenv GOOGLE_APPLICATION_CREDENTIALS"))
+		if err != nil {
+			t.Fatalf("printenv creds: %v", err)
+		}
 
-	// If we're on GCE, we have proper credentials and can test the registry secrets with an artifact registry image
-	if detect.IsOnGCE() && !detect.IsCloudShell() {
+		got := strings.TrimSpace(rr.Stdout.String())
+		expected := "/google-app-creds.json"
+		if got != expected {
+			t.Errorf("'printenv GOOGLE_APPLICATION_CREDENTIALS' returned %s, expected %s", got, expected)
+		}
+
+		// Now check the service account and make sure the "gcp-auth" image pull secret is present
+		rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "describe", "sa", serviceAccountName))
+		if err != nil {
+			t.Fatalf("%s failed: %v", rr.Command(), err)
+		}
+
+		expectedPullSecret := "gcp-auth"
+		re := regexp.MustCompile(`.*Image pull secrets:.*`)
+		secrets := re.FindString(rr.Stdout.String())
+		if !strings.Contains(secrets, expectedPullSecret) {
+			t.Errorf("Unexpected image pull secrets. expected %s, got %s", expectedPullSecret, secrets)
+		}
+
+		if !detect.IsOnGCE() || detect.IsCloudShell() {
+			// Make sure the file contents are correct
+			rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "exec", names[0], "--", "/bin/sh", "-c", "cat /google-app-creds.json"))
+			if err != nil {
+				t.Fatalf("cat creds: %v", err)
+			}
+
+			var gotJSON map[string]string
+			err = json.Unmarshal(bytes.TrimSpace(rr.Stdout.Bytes()), &gotJSON)
+			if err != nil {
+				t.Fatalf("unmarshal json: %v", err)
+			}
+			expectedJSON := map[string]string{
+				"client_id":        "haha",
+				"client_secret":    "nice_try",
+				"quota_project_id": "this_is_fake",
+				"refresh_token":    "maybe_next_time",
+				"type":             "authorized_user",
+			}
+
+			if !reflect.DeepEqual(gotJSON, expectedJSON) {
+				t.Fatalf("unexpected creds file: got %v, expected %v", gotJSON, expectedJSON)
+			}
+		}
+
+		// Check the GOOGLE_CLOUD_PROJECT env var as well
+		rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "exec", names[0], "--", "/bin/sh", "-c", "printenv GOOGLE_CLOUD_PROJECT"))
+		if err != nil {
+			t.Fatalf("print env project: %v", err)
+		}
+
+		got = strings.TrimSpace(rr.Stdout.String())
+		expected = "this_is_fake"
+
+		if got != expected {
+			t.Errorf("'printenv GOOGLE_CLOUD_PROJECT' returned %s, expected %s", got, expected)
+		}
+	})
+
+	t.Run("RealCredentials", func(t *testing.T) {
+		if !detect.IsOnGCE() || detect.IsCloudShell() || VMDriver() {
+			t.Skip("This test requires a GCE instance (excluding Cloud Shell) with a container based driver")
+		}
+
+		// If we're on GCE, we have proper credentials and can test the registry secrets with an artifact registry image
+		t.Skip("skipping GCPAuth addon test until 'Permission \"artifactregistry.repositories.downloadArtifacts\" denied on resource \"projects/k8s-minikube/locations/us/repositories/test-artifacts\" (or it may not exist)' issue is resolved")
+		// "Setting the environment variable MOCK_GOOGLE_TOKEN to true will prevent using the google application credentials to fetch the token used for the image pull secret. Instead the token will be mocked."
+		// ref: https://github.com/GoogleContainerTools/gcp-auth-webhook#gcp-auth-webhook
+		os.Unsetenv("MOCK_GOOGLE_TOKEN")
+		// re-set MOCK_GOOGLE_TOKEN once we're done
+		defer os.Setenv("MOCK_GOOGLE_TOKEN", "true")
+
 		os.Unsetenv("GOOGLE_APPLICATION_CREDENTIALS")
 		os.Unsetenv("GOOGLE_CLOUD_PROJECT")
 		args := []string{"-p", profile, "addons", "enable", "gcp-auth"}
@@ -729,10 +737,11 @@ func validateGCPAuthAddon(ctx context.Context, t *testing.T, profile string) {
 		if err != nil {
 			t.Fatalf("wait for private image: %v", err)
 		}
-	}
+	})
 }
 
 func validateHeadlampAddon(ctx context.Context, t *testing.T, profile string) {
+	defer disableAddon(t, "headlamp", profile)
 	defer PostMortemLogs(t, profile)
 
 	rr, err := Run(t, exec.CommandContext(ctx, Target(), "addons", "enable", "headlamp", "-p", profile, "--alsologtostderr", "-v=1"))
@@ -745,8 +754,19 @@ func validateHeadlampAddon(ctx context.Context, t *testing.T, profile string) {
 	}
 }
 
+// validateInspektorGadgetAddon tests the inspektor-gadget addon by ensuring the pod has come up and addon disables
+func validateInspektorGadgetAddon(ctx context.Context, t *testing.T, profile string) {
+	defer disableAddon(t, "inspektor-gadget", profile)
+	defer PostMortemLogs(t, profile)
+
+	if _, err := PodWait(ctx, t, profile, "gadget", "k8s-app=gadget", Minutes(8)); err != nil {
+		t.Fatalf("failed waiting for inspektor-gadget pod: %v", err)
+	}
+}
+
 // validateCloudSpannerAddon tests the cloud-spanner addon by ensuring the deployment and pod come up and addon disables
 func validateCloudSpannerAddon(ctx context.Context, t *testing.T, profile string) {
+	defer disableAddon(t, "cloud-spanner", profile)
 	defer PostMortemLogs(t, profile)
 
 	client, err := kapi.Client(profile)
@@ -759,7 +779,218 @@ func validateCloudSpannerAddon(ctx context.Context, t *testing.T, profile string
 	if _, err := PodWait(ctx, t, profile, "default", "app=cloud-spanner-emulator", Minutes(6)); err != nil {
 		t.Errorf("failed waiting for app=cloud-spanner-emulator pod: %v", err)
 	}
-	if rr, err := Run(t, exec.CommandContext(ctx, Target(), "addons", "disable", "cloud-spanner", "-p", profile)); err != nil {
-		t.Errorf("failed to disable cloud-spanner addon: args %q : %v", rr.Command(), err)
+}
+
+// validateVolcanoAddon tests the Volcano addon, makes sure the Volcano is installed into cluster.
+func validateVolcanoAddon(ctx context.Context, t *testing.T, profile string) {
+	defer disableAddon(t, "volcano", profile)
+	defer PostMortemLogs(t, profile)
+	if ContainerRuntime() == "crio" {
+		t.Skipf("skipping: crio not supported")
+	}
+
+	volcanoNamespace := "volcano-system"
+
+	client, err := kapi.Client(profile)
+	if err != nil {
+		t.Fatalf("failed to get Kubernetes client for %s: %v", profile, err)
+	}
+
+	// Wait for the volcano component installation to complete
+	start := time.Now()
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		if err := kapi.WaitForDeploymentToStabilize(client, volcanoNamespace, "volcano-scheduler", Minutes(6)); err != nil {
+			t.Errorf("failed waiting for volcano-scheduler deployment to stabilize: %v", err)
+		} else {
+			t.Logf("volcano-scheduler stabilized in %s", time.Since(start))
+		}
+		wg.Done()
+	}()
+	go func() {
+		if err := kapi.WaitForDeploymentToStabilize(client, volcanoNamespace, "volcano-admission", Minutes(6)); err != nil {
+			t.Errorf("failed waiting for volcano-admission deployment to stabilize: %v", err)
+		} else {
+			t.Logf("volcano-admission stabilized in %s", time.Since(start))
+		}
+		wg.Done()
+	}()
+	go func() {
+		if err := kapi.WaitForDeploymentToStabilize(client, volcanoNamespace, "volcano-controllers", Minutes(6)); err != nil {
+			t.Errorf("failed waiting for volcano-controller deployment to stabilize: %v", err)
+		} else {
+			t.Logf("volcano-controller stabilized in %s", time.Since(start))
+		}
+		wg.Done()
+	}()
+	wg.Wait()
+
+	if _, err := PodWait(ctx, t, profile, volcanoNamespace, "app=volcano-scheduler", Minutes(6)); err != nil {
+		t.Fatalf("failed waiting for app=volcano-scheduler pod: %v", err)
+	}
+
+	if _, err := PodWait(ctx, t, profile, volcanoNamespace, "app=volcano-admission", Minutes(6)); err != nil {
+		t.Fatalf("failed waiting for app=volcano-admission pod: %v", err)
+	}
+
+	if _, err := PodWait(ctx, t, profile, volcanoNamespace, "app=volcano-controller", Minutes(6)); err != nil {
+		t.Fatalf("failed waiting for app=volcano-controller pod: %v", err)
+	}
+
+	// When the volcano deployment is complete, delete the volcano-admission-init job, it will affect the tests
+	rr, err := Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "delete", "-n", volcanoNamespace, "job", "volcano-admission-init"))
+	if err != nil {
+		t.Logf("vcjob creation with %s failed: %v", rr.Command(), err)
+	}
+
+	// Create a vcjob
+	rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "create", "-f", filepath.Join(*testdataDir, "vcjob.yaml")))
+	if err != nil {
+		t.Logf("vcjob creation with %s failed: %v", rr.Command(), err)
+	}
+
+	want := "test-job"
+	checkVolcano := func() error {
+		// check the vcjob
+		rr, err := Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "get", "vcjob", "-n", "my-volcano"))
+		if err != nil {
+			return err
+		}
+		if rr.Stderr.String() != "" {
+			t.Logf("%v: unexpected stderr: %s", rr.Command(), rr.Stderr)
+		}
+		if !strings.Contains(rr.Stdout.String(), want) {
+			return fmt.Errorf("%v stdout = %q, want %q", rr.Command(), rr.Stdout, want)
+		}
+		return nil
+	}
+
+	if err := retry.Expo(checkVolcano, time.Second*3, Minutes(2)); err != nil {
+		t.Errorf("failed checking volcano: %v", err.Error())
+	}
+
+	// also ensure the job is actually running
+	if _, err := PodWait(ctx, t, profile, "my-volcano", "volcano.sh/job-name=test-job", Minutes(3)); err != nil {
+		t.Fatalf("failed waiting for test-local-path pod: %v", err)
+	}
+}
+
+// validateLocalPathAddon tests the functionality of the storage-provisioner-rancher addon
+func validateLocalPathAddon(ctx context.Context, t *testing.T, profile string) {
+	if NoneDriver() {
+		t.Skipf("skip local-path test on none driver")
+	}
+	defer disableAddon(t, "storage-provisioner-rancher", profile)
+	defer PostMortemLogs(t, profile)
+
+	// Create a test PVC
+	rr, err := Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "apply", "-f", filepath.Join(*testdataDir, "storage-provisioner-rancher", "pvc.yaml")))
+	if err != nil {
+		t.Fatalf("kubectl apply pvc.yaml failed: args %q: %v", rr.Command(), err)
+	}
+
+	// Deploy a simple pod with PVC
+	rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "apply", "-f", filepath.Join(*testdataDir, "storage-provisioner-rancher", "pod.yaml")))
+	if err != nil {
+		t.Fatalf("kubectl apply pod.yaml failed: args %q: %v", rr.Command(), err)
+	}
+	if err := PVCWait(ctx, t, profile, "default", "test-pvc", Minutes(5)); err != nil {
+		t.Fatalf("failed waiting for PVC test-pvc: %v", err)
+	}
+	if _, err := PodWait(ctx, t, profile, "default", "run=test-local-path", Minutes(3)); err != nil {
+		t.Fatalf("failed waiting for test-local-path pod: %v", err)
+	}
+
+	// Get info about PVC
+	rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "get", "pvc", "test-pvc", "-o=json"))
+	if err != nil {
+		t.Fatalf("kubectl get pvc with %s failed: %v", rr.Command(), err)
+	}
+	pvc := core.PersistentVolumeClaim{}
+	if err := json.NewDecoder(bytes.NewReader(rr.Stdout.Bytes())).Decode(&pvc); err != nil {
+		t.Fatalf("failed decoding json to pvc: %v", err)
+	}
+
+	rr, err = Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "ssh", fmt.Sprintf("cat /opt/local-path-provisioner/%s_default_test-pvc/file1", pvc.Spec.VolumeName)))
+	if err != nil {
+		t.Fatalf("ssh error: %v", err)
+	}
+
+	got := rr.Stdout.String()
+	want := "local-path-provisioner"
+	if !strings.Contains(got, want) {
+		t.Fatalf("%v stdout = %q, want %q", rr.Command(), got, want)
+	}
+
+	// Cleanup
+	rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "delete", "pod", "test-local-path"))
+	if err != nil {
+		t.Logf("cleanup with %s failed: %v", rr.Command(), err)
+	}
+	rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "delete", "pvc", "test-pvc"))
+	if err != nil {
+		t.Logf("cleanup with %s failed: %v", rr.Command(), err)
+	}
+}
+
+// validateEnablingAddonOnNonExistingCluster tests enabling an addon on a non-existing cluster
+func validateEnablingAddonOnNonExistingCluster(ctx context.Context, t *testing.T, profile string) {
+	rr, err := Run(t, exec.CommandContext(ctx, Target(), "addons", "enable", "dashboard", "-p", profile))
+	if err == nil {
+		t.Fatalf("enabling addon succeeded when it shouldn't have: %s", rr.Output())
+	}
+	if !strings.Contains(rr.Output(), "To start a cluster, run") {
+		t.Fatalf("unexpected error was returned: %v", err)
+	}
+}
+
+// validateDisablingAddonOnNonExistingCluster tests disabling an addon on a non-existing cluster
+func validateDisablingAddonOnNonExistingCluster(ctx context.Context, t *testing.T, profile string) {
+	rr, err := Run(t, exec.CommandContext(ctx, Target(), "addons", "disable", "dashboard", "-p", profile))
+	if err == nil {
+		t.Fatalf("disabling addon succeeded when it shouldn't have: %s", rr.Output())
+	}
+	if !strings.Contains(rr.Output(), "To start a cluster, run") {
+		t.Fatalf("unexpected error was returned: %v", err)
+	}
+}
+
+// validateNvidiaDevicePlugin tests the nvidia-device-plugin addon by ensuring the pod comes up and the addon disables
+func validateNvidiaDevicePlugin(ctx context.Context, t *testing.T, profile string) {
+	defer disableAddon(t, "nvidia-device-plugin", profile)
+	defer PostMortemLogs(t, profile)
+
+	if _, err := PodWait(ctx, t, profile, "kube-system", "name=nvidia-device-plugin-ds", Minutes(6)); err != nil {
+		t.Fatalf("failed waiting for nvidia-device-plugin-ds pod: %v", err)
+	}
+}
+
+// validateAmdGpuDevicePlugin tests the amd-gpu-device-plugin addon by ensuring the pod comes up and the addon disables
+func validateAmdGpuDevicePlugin(ctx context.Context, t *testing.T, profile string) {
+	if !(DockerDriver() && amd64Platform()) {
+		t.Skipf("skip amd gpu test on all but docker driver and amd64 platform")
+	}
+	defer disableAddon(t, "amd-gpu-device-plugin", profile)
+	defer PostMortemLogs(t, profile)
+
+	if _, err := PodWait(ctx, t, profile, "kube-system", "name=amd-gpu-device-plugin", Minutes(6)); err != nil {
+		t.Fatalf("failed waiting for amd-gpu-device-plugin pod: %v", err)
+	}
+}
+
+func validateYakdAddon(ctx context.Context, t *testing.T, profile string) {
+	defer disableAddon(t, "yakd", profile)
+	defer PostMortemLogs(t, profile)
+
+	if _, err := PodWait(ctx, t, profile, "yakd-dashboard", "app.kubernetes.io/name=yakd-dashboard", Minutes(2)); err != nil {
+		t.Fatalf("failed waiting for YAKD - Kubernetes Dashboard pod: %v", err)
+	}
+}
+
+func disableAddon(t *testing.T, addon, profile string) {
+	rr, err := Run(t, exec.Command(Target(), "-p", profile, "addons", "disable", addon, "--alsologtostderr", "-v=1"))
+	if err != nil {
+		t.Errorf("failed to disable %s addon: args %q: %v", addon, rr.Command(), err)
 	}
 }

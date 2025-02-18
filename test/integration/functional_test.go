@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -41,9 +42,11 @@ import (
 
 	"k8s.io/minikube/pkg/drivers/kic/oci"
 	"k8s.io/minikube/pkg/minikube/config"
+	"k8s.io/minikube/pkg/minikube/constants"
 	"k8s.io/minikube/pkg/minikube/detect"
 	"k8s.io/minikube/pkg/minikube/localpath"
 	"k8s.io/minikube/pkg/minikube/reason"
+	"k8s.io/minikube/pkg/minikube/service"
 	"k8s.io/minikube/pkg/util/retry"
 
 	"github.com/blang/semver/v4"
@@ -53,9 +56,10 @@ import (
 	"github.com/phayes/freeport"
 	"github.com/pkg/errors"
 	"golang.org/x/build/kubernetes/api"
+	"k8s.io/minikube/pkg/minikube/cruntime"
 )
 
-const addonResizer = "gcr.io/google-containers/addon-resizer"
+const echoServerImg = "kicbase/echo-server"
 
 // validateFunc are for subtests that share a single setup
 type validateFunc func(context.Context, *testing.T, string)
@@ -70,9 +74,26 @@ var runCorpProxy = detect.GithubActionRunner() && runtime.GOOS == "linux" && !ar
 
 // TestFunctional are functionality tests which can safely share a profile in parallel
 func TestFunctional(t *testing.T) {
+	testFunctional(t, "")
+}
 
+// TestFunctionalNewestKubernetes are functionality run functional tests using
+// NewestKubernetesVersion
+func TestFunctionalNewestKubernetes(t *testing.T) {
+	if strings.Contains(*startArgs, "--kubernetes-version") || constants.NewestKubernetesVersion == constants.DefaultKubernetesVersion {
+		t.Skip()
+	}
+	k8sVersionString := constants.NewestKubernetesVersion
+	t.Run("Version"+k8sVersionString, func(t *testing.T) {
+		testFunctional(t, k8sVersionString)
+	})
+
+}
+
+func testFunctional(t *testing.T, k8sVersion string) {
 	profile := UniqueProfileName("functional")
-	ctx, cancel := context.WithTimeout(context.Background(), Minutes(40))
+	ctx := context.WithValue(context.Background(), ContextKey("k8sVersion"), k8sVersion)
+	ctx, cancel := context.WithTimeout(ctx, Minutes(40))
 	defer func() {
 		if !*cleanup {
 			return
@@ -84,7 +105,6 @@ func TestFunctional(t *testing.T) {
 
 		Cleanup(t, profile, cancel)
 	}()
-
 	// Serial tests
 	t.Run("serial", func(t *testing.T) {
 		tests := []struct {
@@ -104,6 +124,7 @@ func TestFunctional(t *testing.T) {
 			{"ComponentHealth", validateComponentHealth},
 			{"LogsCmd", validateLogsCmd},
 			{"LogsFileCmd", validateLogsFileCmd},
+			{"InvalidService", validateInvalidService},
 		}
 		for _, tc := range tests {
 			tc := tc
@@ -179,10 +200,10 @@ func cleanupUnwantedImages(ctx context.Context, t *testing.T, profile string) {
 	if err != nil {
 		t.Skipf("docker is not installed, cannot delete docker images")
 	} else {
-		t.Run("delete addon-resizer images", func(t *testing.T) {
-			tags := []string{"1.8.8", profile}
+		t.Run("delete echo-server images", func(t *testing.T) {
+			tags := []string{"1.0", profile}
 			for _, tag := range tags {
-				image := fmt.Sprintf("%s:%s", addonResizer, tag)
+				image := fmt.Sprintf("%s:%s", echoServerImg, tag)
 				rr, err := Run(t, exec.CommandContext(ctx, "docker", "rmi", "-f", image))
 				if err != nil {
 					t.Logf("failed to remove image %q from docker images. args %q: %v", image, rr.Command(), err)
@@ -217,7 +238,7 @@ func validateNodeLabels(ctx context.Context, t *testing.T, profile string) {
 		t.Errorf("failed to 'kubectl get nodes' with args %q: %v", rr.Command(), err)
 	}
 	// docs: check if the node labels matches with the expected Minikube labels: `minikube.k8s.io/*`
-	expectedLabels := []string{"minikube.k8s.io/commit", "minikube.k8s.io/version", "minikube.k8s.io/updated_at", "minikube.k8s.io/name"}
+	expectedLabels := []string{"minikube.k8s.io/commit", "minikube.k8s.io/version", "minikube.k8s.io/updated_at", "minikube.k8s.io/name", "minikube.k8s.io/primary"}
 	for _, el := range expectedLabels {
 		if !strings.Contains(rr.Output(), el) {
 			t.Errorf("expected to have label %q in node labels but got : %s", el, rr.Output())
@@ -227,7 +248,7 @@ func validateNodeLabels(ctx context.Context, t *testing.T, profile string) {
 
 // tagAndLoadImage is a helper function to pull, tag, load image (decreases cyclomatic complexity for linter).
 func tagAndLoadImage(ctx context.Context, t *testing.T, profile, taggedImage string) {
-	newPulledImage := fmt.Sprintf("%s:%s", addonResizer, "1.8.9")
+	newPulledImage := fmt.Sprintf("%s:%s", echoServerImg, "latest")
 	rr, err := Run(t, exec.CommandContext(ctx, "docker", "pull", newPulledImage))
 	if err != nil {
 		t.Fatalf("failed to setup test (pull image): %v\n%s", err, rr.Output())
@@ -238,7 +259,7 @@ func tagAndLoadImage(ctx context.Context, t *testing.T, profile, taggedImage str
 		t.Fatalf("failed to setup test (tag image) : %v\n%s", err, rr.Output())
 	}
 
-	rr, err = Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "image", "load", "--daemon", taggedImage))
+	rr, err = Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "image", "load", "--daemon", taggedImage, "--alsologtostderr"))
 	if err != nil {
 		t.Fatalf("loading image into minikube from daemon: %v\n%s", err, rr.Output())
 	}
@@ -254,7 +275,7 @@ func runImageList(ctx context.Context, t *testing.T, profile, testName, format, 
 	t.Run(testName, func(t *testing.T) {
 		MaybeParallel(t)
 
-		rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "image", "ls", "--format", format))
+		rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "image", "ls", "--format", format, "--alsologtostderr"))
 		if err != nil {
 			t.Fatalf("listing image with minikube: %v\n%s", err, rr.Output())
 		}
@@ -276,7 +297,7 @@ func runImageList(ctx context.Context, t *testing.T, profile, testName, format, 
 
 func expectedImageFormat(format string) []string {
 	return []string{
-		fmt.Sprintf(format, "k8s.gcr.io/pause"),
+		fmt.Sprintf(format, "registry.k8s.io/pause"),
 		fmt.Sprintf(format, "registry.k8s.io/kube-apiserver"),
 	}
 }
@@ -308,7 +329,7 @@ func validateImageCommands(ctx context.Context, t *testing.T, profile string) {
 		newImage := fmt.Sprintf("localhost/my-image:%s", profile)
 
 		// try to build the new image with minikube
-		rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "image", "build", "-t", newImage, filepath.Join(*testdataDir, "build")))
+		rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "image", "build", "-t", newImage, filepath.Join(*testdataDir, "build"), "--alsologtostderr"))
 		if err != nil {
 			t.Fatalf("building image with minikube: %v\n%s", err, rr.Output())
 		}
@@ -322,8 +343,8 @@ func validateImageCommands(ctx context.Context, t *testing.T, profile string) {
 		checkImageExists(ctx, t, profile, newImage)
 	})
 
-	taggedImage := fmt.Sprintf("%s:%s", addonResizer, profile)
-	imageFile := "addon-resizer-save.tar"
+	taggedImage := fmt.Sprintf("%s:%s", echoServerImg, profile)
+	imageFile := "echo-server-save.tar"
 	var imagePath string
 	defer os.Remove(imageFile)
 
@@ -334,7 +355,7 @@ func validateImageCommands(ctx context.Context, t *testing.T, profile string) {
 			t.Fatalf("failed to get absolute path of file %q: %v", imageFile, err)
 		}
 
-		pulledImage := fmt.Sprintf("%s:%s", addonResizer, "1.8.8")
+		pulledImage := fmt.Sprintf("%s:%s", echoServerImg, "1.0")
 		rr, err := Run(t, exec.CommandContext(ctx, "docker", "pull", pulledImage))
 		if err != nil {
 			t.Fatalf("failed to setup test (pull image): %v\n%s", err, rr.Output())
@@ -348,7 +369,7 @@ func validateImageCommands(ctx context.Context, t *testing.T, profile string) {
 
 	// docs: Make sure image loading from Docker daemon works by `minikube image load --daemon`
 	t.Run("ImageLoadDaemon", func(t *testing.T) {
-		rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "image", "load", "--daemon", taggedImage))
+		rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "image", "load", "--daemon", taggedImage, "--alsologtostderr"))
 		if err != nil {
 			t.Fatalf("loading image into minikube from daemon: %v\n%s", err, rr.Output())
 		}
@@ -358,7 +379,7 @@ func validateImageCommands(ctx context.Context, t *testing.T, profile string) {
 
 	// docs: Try to load image already loaded and make sure `minikube image load --daemon` works
 	t.Run("ImageReloadDaemon", func(t *testing.T) {
-		rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "image", "load", "--daemon", taggedImage))
+		rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "image", "load", "--daemon", taggedImage, "--alsologtostderr"))
 		if err != nil {
 			t.Fatalf("loading image into minikube from daemon: %v\n%s", err, rr.Output())
 		}
@@ -373,7 +394,7 @@ func validateImageCommands(ctx context.Context, t *testing.T, profile string) {
 
 	// docs: Make sure image saving works by `minikube image load --daemon`
 	t.Run("ImageSaveToFile", func(t *testing.T) {
-		rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "image", "save", taggedImage, imagePath))
+		rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "image", "save", taggedImage, imagePath, "--alsologtostderr"))
 		if err != nil {
 			t.Fatalf("saving image from minikube to file: %v\n%s", err, rr.Output())
 		}
@@ -385,7 +406,7 @@ func validateImageCommands(ctx context.Context, t *testing.T, profile string) {
 
 	// docs: Make sure image removal works by `minikube image rm`
 	t.Run("ImageRemove", func(t *testing.T) {
-		rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "image", "rm", taggedImage))
+		rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "image", "rm", taggedImage, "--alsologtostderr"))
 		if err != nil {
 			t.Fatalf("removing image from minikube: %v\n%s", err, rr.Output())
 		}
@@ -402,8 +423,8 @@ func validateImageCommands(ctx context.Context, t *testing.T, profile string) {
 
 	// docs: Make sure image loading from file works by `minikube image load`
 	t.Run("ImageLoadFromFile", func(t *testing.T) {
-		rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "image", "load", imagePath))
-		if err != nil || rr.Stderr.String() != "" {
+		rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "image", "load", imagePath, "--alsologtostderr"))
+		if err != nil || strings.Contains(rr.Output(), "failed pushing to: functional") {
 			t.Fatalf("loading image into minikube from file: %v\n%s", err, rr.Output())
 		}
 
@@ -417,12 +438,15 @@ func validateImageCommands(ctx context.Context, t *testing.T, profile string) {
 			t.Fatalf("failed to remove image from docker: %v\n%s", err, rr.Output())
 		}
 
-		rr, err = Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "image", "save", "--daemon", taggedImage))
+		rr, err = Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "image", "save", "--daemon", taggedImage, "--alsologtostderr"))
 		if err != nil {
 			t.Fatalf("saving image from minikube to daemon: %v\n%s", err, rr.Output())
 		}
-
-		rr, err = Run(t, exec.CommandContext(ctx, "docker", "image", "inspect", taggedImage))
+		imageToDelete := taggedImage
+		if ContainerRuntime() == "crio" {
+			imageToDelete = cruntime.AddLocalhostPrefix(imageToDelete)
+		}
+		rr, err = Run(t, exec.CommandContext(ctx, "docker", "image", "inspect", imageToDelete))
 		if err != nil {
 			t.Fatalf("expected image to be loaded into Docker, but image was not found: %v\n%s", err, rr.Output())
 		}
@@ -621,7 +645,7 @@ func validateStartWithCustomCerts(ctx context.Context, t *testing.T, profile str
 }
 
 // validateAuditAfterStart makes sure the audit log contains the correct logging after minikube start
-func validateAuditAfterStart(ctx context.Context, t *testing.T, profile string) {
+func validateAuditAfterStart(_ context.Context, t *testing.T, profile string) {
 	// docs: Read the audit log file and make sure it contains the current minikube profile name
 	got, err := auditContains(profile)
 	if err != nil {
@@ -642,8 +666,8 @@ func validateSoftStart(ctx context.Context, t *testing.T, profile string) {
 	if err != nil {
 		t.Fatalf("error reading cluster config before soft start: %v", err)
 	}
-	if beforeCfg.Config.KubernetesConfig.NodePort != apiPortTest {
-		t.Errorf("expected cluster config node port before soft start to be %d but got %d", apiPortTest, beforeCfg.Config.KubernetesConfig.NodePort)
+	if beforeCfg.Config.APIServerPort != apiPortTest {
+		t.Errorf("expected cluster config node port before soft start to be %d but got %d", apiPortTest, beforeCfg.Config.APIServerPort)
 	}
 
 	// docs: Run `minikube start` again as a soft start
@@ -661,8 +685,8 @@ func validateSoftStart(ctx context.Context, t *testing.T, profile string) {
 		t.Errorf("error reading cluster config after soft start: %v", err)
 	}
 
-	if afterCfg.Config.KubernetesConfig.NodePort != apiPortTest {
-		t.Errorf("expected node port in the config not change after soft start. exepceted node port to be %d but got %d.", apiPortTest, afterCfg.Config.KubernetesConfig.NodePort)
+	if afterCfg.Config.APIServerPort != apiPortTest {
+		t.Errorf("expected node port in the config not to change after soft start. expected node port to be %d but got %d.", apiPortTest, afterCfg.Config.APIServerPort)
 	}
 }
 
@@ -777,8 +801,8 @@ func imageID(image string) string {
 		},
 	}
 
-	if imgIds, ok := ids[image]; ok {
-		if id, ok := imgIds[runtime.GOARCH]; ok {
+	if imgIDs, ok := ids[image]; ok {
+		if id, ok := imgIDs[runtime.GOARCH]; ok {
 			return id
 		}
 		panic(fmt.Sprintf("unexpected architecture for image %q: %v", image, runtime.GOARCH))
@@ -962,7 +986,7 @@ func validateDryRun(ctx context.Context, t *testing.T, profile string) {
 
 	// docs: Run `minikube start --dry-run --memory 250MB`
 	// Too little memory!
-	startArgs := append([]string{"start", "-p", profile, "--dry-run", "--memory", "250MB", "--alsologtostderr"}, StartArgs()...)
+	startArgs := append([]string{"start", "-p", profile, "--dry-run", "--memory", "250MB", "--alsologtostderr"}, StartArgsWithContext(ctx)...)
 	c := exec.CommandContext(mctx, Target(), startArgs...)
 	rr, err := Run(t, c)
 
@@ -979,7 +1003,7 @@ func validateDryRun(ctx context.Context, t *testing.T, profile string) {
 	dctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	// docs: Run `minikube start --dry-run`
-	startArgs = append([]string{"start", "-p", profile, "--dry-run", "--alsologtostderr", "-v=1"}, StartArgs()...)
+	startArgs = append([]string{"start", "-p", profile, "--dry-run", "--alsologtostderr", "-v=1"}, StartArgsWithContext(ctx)...)
 	c = exec.CommandContext(dctx, Target(), startArgs...)
 	rr, err = Run(t, c)
 	// docs: Make sure the command doesn't raise any error
@@ -1004,7 +1028,7 @@ func validateInternationalLanguage(ctx context.Context, t *testing.T, profile st
 	defer cancel()
 
 	// Too little memory!
-	startArgs := append([]string{"start", "-p", profile, "--dry-run", "--memory", "250MB", "--alsologtostderr"}, StartArgs()...)
+	startArgs := append([]string{"start", "-p", profile, "--dry-run", "--memory", "250MB", "--alsologtostderr"}, StartArgsWithContext(ctx)...)
 	c := exec.CommandContext(mctx, Target(), startArgs...)
 	// docs: Set environment variable `LC_ALL=fr` to enable minikube translation to French
 	c.Env = append(os.Environ(), "LC_ALL=fr")
@@ -1038,7 +1062,7 @@ func validateCacheCmd(ctx context.Context, t *testing.T, profile string) {
 
 		// docs: Run `minikube cache add` and make sure we can add a remote image to the cache
 		t.Run("add_remote", func(t *testing.T) {
-			for _, img := range []string{"k8s.gcr.io/pause:3.1", "k8s.gcr.io/pause:3.3", "k8s.gcr.io/pause:latest"} {
+			for _, img := range []string{"registry.k8s.io/pause:3.1", "registry.k8s.io/pause:3.3", "registry.k8s.io/pause:latest"} {
 				rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "cache", "add", img))
 				if err != nil {
 					t.Errorf("failed to 'cache add' remote image %q. args %q err %v", img, rr.Command(), err)
@@ -1091,10 +1115,10 @@ func validateCacheCmd(ctx context.Context, t *testing.T, profile string) {
 		})
 
 		// docs: Run `minikube cache delete` and make sure we can delete an image from the cache
-		t.Run("delete_k8s.gcr.io/pause:3.3", func(t *testing.T) {
-			rr, err := Run(t, exec.CommandContext(ctx, Target(), "cache", "delete", "k8s.gcr.io/pause:3.3"))
+		t.Run("CacheDelete", func(t *testing.T) {
+			rr, err := Run(t, exec.CommandContext(ctx, Target(), "cache", "delete", "registry.k8s.io/pause:3.3"))
 			if err != nil {
-				t.Errorf("failed to delete image k8s.gcr.io/pause:3.3 from cache. args %q: %v", rr.Command(), err)
+				t.Errorf("failed to delete image registry.k8s.io/pause:3.3 from cache. args %q: %v", rr.Command(), err)
 			}
 		})
 
@@ -1104,11 +1128,11 @@ func validateCacheCmd(ctx context.Context, t *testing.T, profile string) {
 			if err != nil {
 				t.Errorf("failed to do cache list. args %q: %v", rr.Command(), err)
 			}
-			if !strings.Contains(rr.Output(), "k8s.gcr.io/pause") {
-				t.Errorf("expected 'cache list' output to include 'k8s.gcr.io/pause' but got: ***%s***", rr.Output())
+			if !strings.Contains(rr.Output(), "registry.k8s.io/pause") {
+				t.Errorf("expected 'cache list' output to include 'registry.k8s.io/pause' but got: ***%s***", rr.Output())
 			}
-			if strings.Contains(rr.Output(), "k8s.gcr.io/pause:3.3") {
-				t.Errorf("expected 'cache list' output not to include k8s.gcr.io/pause:3.3 but got: ***%s***", rr.Output())
+			if strings.Contains(rr.Output(), "registry.k8s.io/pause:3.3") {
+				t.Errorf("expected 'cache list' output not to include registry.k8s.io/pause:3.3 but got: ***%s***", rr.Output())
 			}
 		})
 
@@ -1126,7 +1150,7 @@ func validateCacheCmd(ctx context.Context, t *testing.T, profile string) {
 
 		// docs: Delete an image from minikube node and run `minikube cache reload` to make sure the image is brought back correctly
 		t.Run("cache_reload", func(t *testing.T) { // deleting image inside minikube node manually and expecting reload to bring it back
-			img := "k8s.gcr.io/pause:latest"
+			img := "registry.k8s.io/pause:latest"
 			// deleting image inside minikube node manually
 
 			var binary string
@@ -1161,7 +1185,7 @@ func validateCacheCmd(ctx context.Context, t *testing.T, profile string) {
 
 		// delete will clean up the cached images since they are global and all other tests will load it for no reason
 		t.Run("delete", func(t *testing.T) {
-			for _, img := range []string{"k8s.gcr.io/pause:3.1", "k8s.gcr.io/pause:latest"} {
+			for _, img := range []string{"registry.k8s.io/pause:3.1", "registry.k8s.io/pause:latest"} {
 				rr, err := Run(t, exec.CommandContext(ctx, Target(), "cache", "delete", img))
 				if err != nil {
 					t.Errorf("failed to delete %s from cache. args %q: %v", img, rr.Command(), err)
@@ -1243,9 +1267,6 @@ func validateLogsFileCmd(ctx context.Context, t *testing.T, profile string) {
 	rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "logs", "--file", logFileName))
 	if err != nil {
 		t.Errorf("%s failed: %v", rr.Command(), err)
-	}
-	if rr.Stdout.String() != "" {
-		t.Errorf("expected empty minikube logs output, but got: \n***%s***\n", rr.Output())
 	}
 
 	logs, err := os.ReadFile(logFileName)
@@ -1385,14 +1406,6 @@ func validateProfileCmd(ctx context.Context, t *testing.T, profile string) {
 	})
 }
 
-func killContext(cmdContext *exec.Cmd, killDelay time.Duration, t *testing.T) {
-	time.Sleep(killDelay)
-	err := cmdContext.Process.Signal(os.Interrupt)
-	if err != nil {
-		t.Error("Failed to sent interrupt to proc", err)
-	}
-}
-
 // validateServiceCmd asserts basic "service" command functionality
 func validateServiceCmd(ctx context.Context, t *testing.T, profile string) {
 	defer PostMortemLogs(t, profile)
@@ -1423,101 +1436,175 @@ func validateServiceCmd(ctx context.Context, t *testing.T, profile string) {
 		}
 	}()
 
-	var rr *RunResult
-	var err error
-	// docs: Create a new `k8s.gcr.io/echoserver` deployment
-	// k8s.gcr.io/echoserver is not multi-arch
-	if arm64Platform() {
-		rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "create", "deployment", "hello-node", "--image=k8s.gcr.io/echoserver-arm:1.8"))
-	} else {
-		rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "create", "deployment", "hello-node", "--image=k8s.gcr.io/echoserver:1.8"))
-	}
+	validateServiceCmdDeployApp(ctx, t, profile)
+	validateServiceCmdList(ctx, t, profile)
+	validateServiceCmdJSON(ctx, t, profile)
+	validateServiceCmdHTTPS(ctx, t, profile)
+	validateServiceCmdFormat(ctx, t, profile)
+	validateServiceCmdURL(ctx, t, profile)
+}
 
-	if err != nil {
-		t.Fatalf("failed to create hello-node deployment with this command %q: %v.", rr.Command(), err)
-	}
-	rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "expose", "deployment", "hello-node", "--type=NodePort", "--port=8080"))
-	if err != nil {
-		t.Fatalf("failed to expose hello-node deployment: %q : %v", rr.Command(), err)
-	}
-
-	if _, err := PodWait(ctx, t, profile, "default", "app=hello-node", Minutes(10)); err != nil {
-		t.Fatalf("failed waiting for hello-node pod: %v", err)
-	}
-
-	// docs: Run `minikube service list` to make sure the newly created service is correctly listed in the output
-	rr, err = Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "service", "list"))
-	if err != nil {
-		t.Errorf("failed to do service list. args %q : %v", rr.Command(), err)
-	}
-	if !strings.Contains(rr.Stdout.String(), "hello-node") {
-		t.Errorf("expected 'service list' to contain *hello-node* but got -%q-", rr.Stdout.String())
-	}
-
-	// docs: Run `minikube service` with `--https --url` to make sure the HTTPS endpoint URL of the service is printed
-	cmdContext := exec.CommandContext(ctx, Target(), "-p", profile, "service", "--namespace=default", "--https", "--url", "hello-node")
-	if NeedsPortForward() {
-		go killContext(cmdContext, 2*time.Second, t)
-	}
-
-	rr, err = Run(t, cmdContext)
-	if err != nil && !strings.Contains(err.Error(), "interrupt") {
-		t.Fatalf("failed to get service url. args %q : %v", rr.Command(), err)
-	}
-
-	splits := strings.Split(rr.Stdout.String(), "|")
-	var endpoint string
-	// get the last endpoint in the output to test http to https
-	for _, v := range splits {
-		if strings.Contains(v, "http") {
-			endpoint = strings.TrimSpace(v)
+// validateServiceCmdDeployApp Create a new `registry.k8s.io/echoserver` deployment
+func validateServiceCmdDeployApp(ctx context.Context, t *testing.T, profile string) {
+	t.Run("DeployApp", func(t *testing.T) {
+		var rr *RunResult
+		var err error
+		// registry.k8s.io/echoserver is not multi-arch
+		if arm64Platform() {
+			rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "create", "deployment", "hello-node", "--image=registry.k8s.io/echoserver-arm:1.8"))
+		} else {
+			rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "create", "deployment", "hello-node", "--image=registry.k8s.io/echoserver:1.8"))
 		}
-	}
-	t.Logf("found endpoint: %s", endpoint)
 
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		t.Fatalf("failed to parse service url endpoint %q: %v", endpoint, err)
-	}
-	if u.Scheme != "https" {
-		t.Errorf("expected scheme for %s to be 'https' but got %q", endpoint, u.Scheme)
-	}
+		if err != nil {
+			t.Fatalf("failed to create hello-node deployment with this command %q: %v.", rr.Command(), err)
+		}
+		rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "expose", "deployment", "hello-node", "--type=NodePort", "--port=8080"))
+		if err != nil {
+			t.Fatalf("failed to expose hello-node deployment: %q : %v", rr.Command(), err)
+		}
 
-	cmdContext = exec.CommandContext(ctx, Target(), "-p", profile, "service", "hello-node", "--url", "--format={{.IP}}")
-	if NeedsPortForward() {
-		go killContext(cmdContext, 2*time.Second, t)
-	}
-	// docs: Run `minikube service` with `--url --format={{.IP}}` to make sure the IP address of the service is printed
-	rr, err = Run(t, cmdContext)
-	if err != nil && !strings.Contains(err.Error(), "interrupt") {
-		t.Errorf("failed to get service url with custom format. args %q: %v", rr.Command(), err)
-	}
+		if _, err := PodWait(ctx, t, profile, "default", "app=hello-node", Minutes(10)); err != nil {
+			t.Fatalf("failed waiting for hello-node pod: %v", err)
+		}
+	})
+}
 
-	if strings.TrimSpace(rr.Stdout.String()) != u.Hostname() {
-		t.Errorf("expected 'service --format={{.IP}}' output to be -%q- but got *%q* . args %q.", u.Hostname(), rr.Stdout.String(), rr.Command())
-	}
+// validateServiceCmdList Run `minikube service list` to make sure the newly created service is correctly listed in the output
+func validateServiceCmdList(ctx context.Context, t *testing.T, profile string) {
+	t.Run("List", func(t *testing.T) {
+		rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "service", "list"))
+		if err != nil {
+			t.Errorf("failed to do service list. args %q : %v", rr.Command(), err)
+		}
+		if !strings.Contains(rr.Stdout.String(), "hello-node") {
+			t.Errorf("expected 'service list' to contain *hello-node* but got -%q-", rr.Stdout.String())
+		}
+	})
+}
 
-	cmdContext = exec.CommandContext(ctx, Target(), "-p", profile, "service", "hello-node", "--url")
-	if NeedsPortForward() {
-		go killContext(cmdContext, 2*time.Second, t)
-	}
-	// docs: Run `minikube service` with a regular `--url` to make sure the HTTP endpoint URL of the service is printed
-	rr, err = Run(t, cmdContext)
-	if err != nil {
-		t.Errorf("failed to get service url. args: %q: %v", rr.Command(), err)
-	}
+// validateServiceCmdJSON Run `minikube service list -o JSON` and make sure the services are correctly listed as JSON output
+func validateServiceCmdJSON(ctx context.Context, t *testing.T, profile string) {
+	t.Run("JSONOutput", func(t *testing.T) {
+		targetSvcName := "hello-node"
+		// helper function to run command then, return target service object from json output.
+		extractServiceObjFunc := func(rr *RunResult) *service.SvcURL {
+			var jsonObjects service.URLs
+			if err := json.Unmarshal(rr.Stdout.Bytes(), &jsonObjects); err != nil {
+				t.Fatalf("failed to decode json from profile list: args %q: %v", rr.Command(), err)
+			}
 
-	endpoint = strings.TrimSpace(rr.Stdout.String())
-	t.Logf("found endpoint for hello-node: %s", endpoint)
+			for _, svc := range jsonObjects {
+				if svc.Name == targetSvcName {
+					return &svc
+				}
+			}
+			return nil
+		}
 
-	u, err = url.Parse(endpoint)
-	if err != nil {
-		t.Fatalf("failed to parse %q: %v", endpoint, err)
-	}
+		start := time.Now()
+		rr, err := Run(t, exec.CommandContext(ctx, Target(), "-p", profile, "service", "list", "-o", "json"))
+		if err != nil {
+			t.Fatalf("failed to list services with json format. args %q: %v", rr.Command(), err)
+		}
+		elapsed := time.Since(start)
+		t.Logf("Took %q to run %q", elapsed, rr.Command())
 
-	if u.Scheme != "http" {
-		t.Fatalf("expected scheme to be -%q- got scheme: *%q*", "http", u.Scheme)
+		pr := extractServiceObjFunc(rr)
+		if pr == nil {
+			t.Errorf("expected the json of 'service list' to include %q but got *%q*. args: %q", targetSvcName, rr.Stdout.String(), rr.Command())
+		}
+	})
+}
+
+// validateServiceCmdHTTPS Run `minikube service` with `--https --url` to make sure the HTTPS endpoint URL of the service is printed
+func validateServiceCmdHTTPS(ctx context.Context, t *testing.T, profile string) {
+	t.Run("HTTPS", func(t *testing.T) {
+		cmdCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(cmdCtx, Target(), "-p", profile, "service", "--namespace=default", "--https", "--url", "hello-node")
+		rr, err := Run(t, cmd)
+		if isUnexpectedServiceError(cmdCtx, err) {
+			t.Fatalf("failed to get service url. args %q : %v", rr.Command(), err)
+		}
+
+		splits := strings.Split(rr.Stdout.String(), "|")
+		var endpoint string
+		// get the last endpoint in the output to test http to https
+		for _, v := range splits {
+			if strings.Contains(v, "http") {
+				endpoint = strings.TrimSpace(v)
+			}
+		}
+		t.Logf("found endpoint: %s", endpoint)
+
+		u, err := url.Parse(endpoint)
+		if err != nil {
+			t.Fatalf("failed to parse service url endpoint %q: %v", endpoint, err)
+		}
+		if u.Scheme != "https" {
+			t.Errorf("expected scheme for %s to be 'https' but got %q", endpoint, u.Scheme)
+		}
+	})
+}
+
+// validateServiceCmdFormat Run `minikube service` with `--url --format={{.IP}}` to make sure the IP address of the service is printed
+func validateServiceCmdFormat(ctx context.Context, t *testing.T, profile string) {
+	t.Run("Format", func(t *testing.T) {
+		cmdCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(cmdCtx, Target(), "-p", profile, "service", "hello-node", "--url", "--format={{.IP}}")
+		rr, err := Run(t, cmd)
+		if isUnexpectedServiceError(cmdCtx, err) {
+			t.Errorf("failed to get service url with custom format. args %q: %v", rr.Command(), err)
+		}
+
+		stringIP := strings.TrimSpace(rr.Stdout.String())
+
+		if ip := net.ParseIP(stringIP); ip == nil {
+			t.Fatalf("%q is not a valid IP", stringIP)
+		}
+	})
+}
+
+// validateServiceCmdURL Run `minikube service` with a regular `--url` to make sure the HTTP endpoint URL of the service is printed
+func validateServiceCmdURL(ctx context.Context, t *testing.T, profile string) {
+	t.Run("URL", func(t *testing.T) {
+		cmdCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(cmdCtx, Target(), "-p", profile, "service", "hello-node", "--url")
+		rr, err := Run(t, cmd)
+		if isUnexpectedServiceError(cmdCtx, err) {
+			t.Errorf("failed to get service url. args: %q: %v", rr.Command(), err)
+		}
+
+		endpoint := strings.TrimSpace(rr.Stdout.String())
+		t.Logf("found endpoint for hello-node: %s", endpoint)
+
+		u, err := url.Parse(endpoint)
+		if err != nil {
+			t.Fatalf("failed to parse %q: %v", endpoint, err)
+		}
+
+		if u.Scheme != "http" {
+			t.Fatalf("expected scheme to be -%q- got scheme: *%q*", "http", u.Scheme)
+		}
+	})
+}
+
+// isUnexpectedServiceError is used to prevent failing ServiceCmd tests on Docker Desktop due to DeadlineExceeded errors.
+// Due to networking constraints Docker Desktop requires creating an SSH tunnel to connect to a service. This command has
+// to be left running to keep the SSH tunnel connected, so for the ServiceCmd tests we set a timeout context so we can
+// check the output and then the command is terminated, otherwise it would keep runnning forever. So if using Docker
+// Desktop and the DeadlineExceeded, consider it an expected error.
+func isUnexpectedServiceError(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
 	}
+	if !NeedsPortForward() {
+		return true
+	}
+	return ctx.Err() != context.DeadlineExceeded
 }
 
 func validateServiceCmdConnect(ctx context.Context, t *testing.T, profile string) {
@@ -1551,12 +1638,12 @@ func validateServiceCmdConnect(ctx context.Context, t *testing.T, profile string
 
 	var rr *RunResult
 	var err error
-	// docs: Create a new `k8s.gcr.io/echoserver` deployment
-	// k8s.gcr.io/echoserver is not multi-arch
+	// docs: Create a new `registry.k8s.io/echoserver` deployment
+	// registry.k8s.io/echoserver is not multi-arch
 	if arm64Platform() {
-		rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "create", "deployment", "hello-node-connect", "--image=k8s.gcr.io/echoserver-arm:1.8"))
+		rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "create", "deployment", "hello-node-connect", "--image=registry.k8s.io/echoserver-arm:1.8"))
 	} else {
-		rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "create", "deployment", "hello-node-connect", "--image=k8s.gcr.io/echoserver:1.8"))
+		rr, err = Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "create", "deployment", "hello-node-connect", "--image=registry.k8s.io/echoserver:1.8"))
 	}
 
 	if err != nil {
@@ -1705,6 +1792,9 @@ func validateCpCmd(ctx context.Context, t *testing.T, profile string) {
 
 	tmpPath := filepath.Join(tmpDir, "cp-test.txt")
 	testCpCmd(ctx, t, profile, profile, dstPath, "", tmpPath)
+
+	// copy to nonexistent directory structure
+	testCpCmd(ctx, t, profile, "", srcPath, "", "/tmp/does/not/exist/cp-test.txt")
 }
 
 // validateMySQL validates a minimalist MySQL deployment
@@ -1777,7 +1867,7 @@ func localEmptyCertPath() string {
 }
 
 // Copy extra file into minikube home folder for file sync test
-func setupFileSync(ctx context.Context, t *testing.T, profile string) {
+func setupFileSync(_ context.Context, t *testing.T, _ string) {
 	p := localSyncTestPath()
 	t.Logf("local sync path: %s", p)
 	syncFile := filepath.Join(*testdataDir, "sync.test")
@@ -2152,7 +2242,7 @@ func startMinikubeWithProxy(ctx context.Context, t *testing.T, profile string, p
 		memoryFlag = "--memory=6000"
 	}
 	// passing --api-server-port so later verify it didn't change in soft start.
-	startArgs := append([]string{"start", "-p", profile, memoryFlag, fmt.Sprintf("--apiserver-port=%d", apiPortTest), "--wait=all"}, StartArgs()...)
+	startArgs := append([]string{"start", "-p", profile, memoryFlag, fmt.Sprintf("--apiserver-port=%d", apiPortTest), "--wait=all"}, StartArgsWithContext(ctx)...)
 	c := exec.CommandContext(ctx, Target(), startArgs...)
 	env := os.Environ()
 	env = append(env, fmt.Sprintf("%s=%s", proxyEnv, addr))
@@ -2215,6 +2305,7 @@ func validateLicenseCmd(ctx context.Context, t *testing.T, _ string) {
 	if rr, err := Run(t, exec.CommandContext(ctx, Target(), "license")); err != nil {
 		t.Fatalf("command %q failed: %v", rr.Stdout.String(), err)
 	}
+	defer os.Remove("./licenses")
 	files, err := os.ReadDir("./licenses")
 	if err != nil {
 		t.Fatalf("failed to read licenses dir: %v", err)
@@ -2237,5 +2328,29 @@ func validateLicenseCmd(ctx context.Context, t *testing.T, _ string) {
 	expectedString := "Apache License"
 	if !strings.Contains(string(data), expectedString) {
 		t.Errorf("expected license file to contain %q, but was not found", expectedString)
+	}
+}
+
+// validateInvalidService makes sure minikube will not start a tunnel for an unavailable service that has no running pods
+func validateInvalidService(ctx context.Context, t *testing.T, profile string) {
+
+	// try to start an invalid service. This service is linked to a pod whose image name is invalid, so this pod will never become running
+	rrApply, err := Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "apply", "-f", filepath.Join(*testdataDir, "invalidsvc.yaml")))
+	if err != nil {
+		t.Fatalf("%s failed: %v", rrApply.Command(), err)
+	}
+	defer func() {
+		// Cleanup test configurations in advance of future tests
+		rr, err := Run(t, exec.CommandContext(ctx, "kubectl", "--context", profile, "delete", "-f", filepath.Join(*testdataDir, "invalidsvc.yaml")))
+		if err != nil {
+			t.Fatalf("clean up %s failed: %v", rr.Command(), err)
+		}
+	}()
+	time.Sleep(3 * time.Second)
+
+	// try to expose a service, this action is supposed to fail
+	rrService, err := Run(t, exec.CommandContext(ctx, Target(), "service", "invalid-svc", "-p", profile))
+	if err == nil || rrService.ExitCode == 0 {
+		t.Fatalf("%s should have failed: ", rrService.Command())
 	}
 }

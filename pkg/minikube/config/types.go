@@ -25,10 +25,11 @@ import (
 
 // Profile represents a minikube profile
 type Profile struct {
-	Name   string
-	Status string // running, stopped, paused, unknown
-	Config *ClusterConfig
-	Active bool
+	Name              string
+	Status            string // running, stopped, paused, unknown
+	Config            *ClusterConfig
+	Active            bool
+	ActiveKubeContext bool
 }
 
 // ClusterConfig contains the parameters used to start a cluster.
@@ -41,7 +42,6 @@ type ClusterConfig struct {
 	Memory                  int
 	CPUs                    int
 	DiskSize                int
-	VMDriver                string // Legacy use only
 	Driver                  string
 	HyperkitVpnKitSock      string   // Only used by the Hyperkit driver
 	HyperkitVSockPorts      []string // Only used by the Hyperkit driver
@@ -76,7 +76,7 @@ type ClusterConfig struct {
 	KubernetesConfig        KubernetesConfig
 	Nodes                   []Node
 	Addons                  map[string]bool
-	CustomAddonImages       map[string]string // Maps image names to the image to use for addons. e.g. Dashboard -> k8s.gcr.io/echoserver:1.4 makes dashboard addon use echoserver for its Dashboard deployment.
+	CustomAddonImages       map[string]string // Maps image names to the image to use for addons. e.g. Dashboard -> registry.k8s.io/echoserver:1.4 makes dashboard addon use echoserver for its Dashboard deployment.
 	CustomAddonRegistries   map[string]string // Maps image names to the registry to use for addons. See CustomAddonImages for example.
 	VerifyComponents        map[string]bool   // map of components to verify and wait for after start.
 	StartHostTimeout        time.Duration
@@ -104,6 +104,11 @@ type ClusterConfig struct {
 	CustomQemuFirmwarePath  string
 	SocketVMnetClientPath   string
 	SocketVMnetPath         string
+	StaticIP                string
+	SSHAuthSock             string
+	SSHAgentPID             int
+	GPUs                    string
+	AutoPauseInterval       time.Duration // Specifies interval of time to wait before checking if cluster should be paused
 }
 
 // KubernetesConfig contains the parameters used to configure the VM Kubernetes.
@@ -111,6 +116,7 @@ type KubernetesConfig struct {
 	KubernetesVersion   string
 	ClusterName         string
 	Namespace           string
+	APIServerHAVIP      string
 	APIServerName       string
 	APIServerNames      []string
 	APIServerIPs        []net.IP
@@ -131,11 +137,6 @@ type KubernetesConfig struct {
 
 	EnableDefaultCNI bool   // deprecated in preference to CNI
 	CNI              string // CNI to use
-
-	// We need to keep these in the short term for backwards compatibility
-	NodeIP   string
-	NodePort int
-	NodeName string
 }
 
 // Node contains information about specific nodes in a cluster

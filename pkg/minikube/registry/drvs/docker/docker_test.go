@@ -22,7 +22,9 @@ import (
 	"testing"
 
 	"github.com/blang/semver/v4"
+	"k8s.io/minikube/pkg/drivers/kic/oci"
 	"k8s.io/minikube/pkg/minikube/driver"
+	"k8s.io/minikube/pkg/minikube/registry"
 )
 
 type testCase struct {
@@ -64,7 +66,7 @@ func stringToIntSlice(t *testing.T, s string) []int {
 	return []int{int(sem.Major), int(sem.Minor), int(sem.Patch)}
 }
 
-func TestCheckDockerVersion(t *testing.T) {
+func TestCheckDockerEngineVersion(t *testing.T) {
 	recParts := stringToIntSlice(t, recommendedDockerVersion)
 	minParts := stringToIntSlice(t, minDockerVersion)
 
@@ -135,8 +137,8 @@ func TestCheckDockerVersion(t *testing.T) {
 	}...)
 
 	for _, c := range tc {
-		t.Run("checkDockerVersion test", func(t *testing.T) {
-			s := checkDockerVersion(c.version)
+		t.Run("checkDockerEngineVersion test", func(t *testing.T) {
+			s := checkDockerEngineVersion(c.version)
 			if s.Error != nil {
 				if c.expect != s.Reason {
 					t.Errorf("Error %v expected. but got %q. (version string : %s)", c.expect, s.Reason, c.version)
@@ -148,5 +150,47 @@ func TestCheckDockerVersion(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCheckDockerDesktopVersion(t *testing.T) {
+	tests := []struct {
+		input             string
+		shouldReturnError bool
+	}{
+		{"Docker Desktop", false},
+		{"Cat Desktop 4.16.0", false},
+		{"Docker Playground 4.16.0", false},
+		{"Docker Desktop 4.15.0", false},
+		{"Docker Desktop 4.16.0", true},
+		{"  Docker  Desktop  4.16.0  ", true},
+	}
+	for _, tt := range tests {
+		state := checkDockerDesktopVersion(tt.input)
+		err := state.Error
+		if (err == nil && tt.shouldReturnError) || (err != nil && !tt.shouldReturnError) {
+			t.Errorf("checkDockerDesktopVersion(%q) = %+v; expected shouldReturnError = %t", tt.input, state, tt.shouldReturnError)
+		}
+	}
+}
+
+func TestStatus(t *testing.T) {
+	tests := []struct {
+		input             string
+		shouldReturnError bool
+	}{
+		{"linux-20.10.22:Docker Desktop 4.16.2 (95914)", false},
+		{"noDashHere:Docker Desktop 4.16.2 (95914)", true},
+		{"linux-20.10.22:Docker Desktop 4.16.0 (95914)", true},
+		{"", true},
+	}
+	for _, tt := range tests {
+		dockerVersionOrState = func() (string, registry.State) { return tt.input, registry.State{} }
+		oci.CachedDaemonInfo = func(string) (oci.SysInfo, error) { return oci.SysInfo{}, nil }
+		state := status()
+		err := state.Error
+		if (err == nil && tt.shouldReturnError) || (err != nil && !tt.shouldReturnError) {
+			t.Errorf("status(%q) = %+v; expected shouldReturnError = %t", tt.input, state, tt.shouldReturnError)
+		}
 	}
 }

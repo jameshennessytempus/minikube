@@ -22,8 +22,8 @@ minikube status [flags]
 ### Options
 
 ```
-  -f, --format string         Go template format string for the status output.  The format for Go templates can be found here: https://golang.org/pkg/text/template/
-                              For the list accessible variables for the template, see the struct values here: https://godoc.org/k8s.io/minikube/cmd/minikube/cmd#Status (default "{{.Name}}\ntype: Control Plane\nhost: {{.Host}}\nkubelet: {{.Kubelet}}\napiserver: {{.APIServer}}\nkubeconfig: {{.Kubeconfig}}\n{{- if .TimeToStop }}\ntimeToStop: {{.TimeToStop}}\n{{- end }}\n{{- if .DockerEnv }}\ndocker-env: {{.DockerEnv}}\n{{- end }}\n{{- if .PodManEnv }}\npodman-env: {{.PodManEnv}}\n{{- end }}\n\n")
+  -f, --format string         Go template format string for the status output.  The format for Go templates can be found here: https://pkg.go.dev/text/template
+                              For the list accessible variables for the template, see the struct values here: https://pkg.go.dev/k8s.io/minikube/cmd/minikube/cmd#Status (default "{{.Name}}\ntype: Control Plane\nhost: {{.Host}}\nkubelet: {{.Kubelet}}\napiserver: {{.APIServer}}\nkubeconfig: {{.Kubeconfig}}\n{{- if .TimeToStop }}\ntimeToStop: {{.TimeToStop}}\n{{- end }}\n{{- if .DockerEnv }}\ndocker-env: {{.DockerEnv}}\n{{- end }}\n{{- if .PodManEnv }}\npodman-env: {{.PodManEnv}}\n{{- end }}\n\n")
   -l, --layout string         output layout (EXPERIMENTAL, JSON only): 'nodes' or 'cluster' (default "nodes")
   -n, --node string           The node to check status for. Defaults to control plane. Leave blank with default format for status on all nodes.
   -o, --output string         minikube status --output OUTPUT. json, text (default "text")
@@ -45,9 +45,10 @@ minikube status [flags]
       --one_output                       If true, only write logs to their native severity level (vs also writing to each lower severity level; no effect when -logtostderr=true)
   -p, --profile string                   The name of the minikube VM being used. This can be set to allow having multiple instances of minikube independently. (default "minikube")
       --rootless                         Force to use rootless driver (docker and podman driver only)
+      --skip-audit                       Skip recording the current command in the audit logs.
       --skip_headers                     If true, avoid header prefixes in the log messages
       --skip_log_headers                 If true, avoid headers when opening log files (no effect when -logtostderr=true)
-      --stderrthreshold severity         logs at or above this threshold go to stderr when writing to files and stderr (no effect when -logtostderr=true or -alsologtostderr=false) (default 2)
+      --stderrthreshold severity         logs at or above this threshold go to stderr when writing to files and stderr (no effect when -logtostderr=true or -alsologtostderr=true) (default 2)
       --user string                      Specifies the user executing the operation. Useful for auditing operations executed by 3rd party tools. Defaults to the operating system username.
   -v, --v Level                          number for the log level verbosity
       --vmodule moduleSpec               comma-separated list of pattern=N settings for file-filtered logging

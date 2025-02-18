@@ -30,22 +30,45 @@ tests the registry addon
 #### validateMetricsServerAddon
 tests the metrics server addon by making sure "kubectl top pods" returns a sensible result
 
-#### validateHelmTillerAddon
-tests the helm tiller addon by running "helm version" inside the cluster
-
 #### validateOlmAddon
 tests the OLM addon
 
 #### validateCSIDriverAndSnapshots
 tests the csi hostpath driver by creating a persistent volume, snapshotting it and restoring it.
 
+#### validateGCPAuthNamespaces
+validates that newly created namespaces contain the gcp-auth secret.
+
 #### validateGCPAuthAddon
 tests the GCP Auth addon with either phony or real credentials and makes sure the files are mounted into pods correctly
 
 #### validateHeadlampAddon
 
+#### validateInspektorGadgetAddon
+tests the inspektor-gadget addon by ensuring the pod has come up and addon disables
+
 #### validateCloudSpannerAddon
 tests the cloud-spanner addon by ensuring the deployment and pod come up and addon disables
+
+#### validateVolcanoAddon
+tests the Volcano addon, makes sure the Volcano is installed into cluster.
+
+#### validateLocalPathAddon
+tests the functionality of the storage-provisioner-rancher addon
+
+#### validateEnablingAddonOnNonExistingCluster
+tests enabling an addon on a non-existing cluster
+
+#### validateDisablingAddonOnNonExistingCluster
+tests disabling an addon on a non-existing cluster
+
+#### validateNvidiaDevicePlugin
+tests the nvidia-device-plugin addon by ensuring the pod comes up and the addon disables
+
+#### validateAmdGpuDevicePlugin
+tests the amd-gpu-device-plugin addon by ensuring the pod comes up and the addon disables
+
+#### validateYakdAddon
 
 ## TestCertOptions
 makes sure minikube certs respect the --apiserver-ips and --apiserver-names parameters
@@ -73,6 +96,9 @@ makes sure the --force-systemd flag worked with the cri-o container runtime
 ## TestForceSystemdEnv
 makes sure the MINIKUBE_FORCE_SYSTEMD environment variable works just as well as the --force-systemd flag
 
+## TestDockerEnvContainerd
+makes sure that minikube docker-env command works when the runtime is containerd
+
 ## TestKVMDriverInstallOrUpdate
 makes sure our docker-machine-driver-kvm2 binary can be installed properly
 
@@ -87,6 +113,10 @@ asserts that there are no unexpected errors displayed in minikube command output
 
 ## TestFunctional
 are functionality tests which can safely share a profile in parallel
+
+## TestFunctionalNewestKubernetes
+are functionality run functional tests using
+NewestKubernetesVersion
 
 #### validateNodeLabels
 checks if minikube cluster is created with correct kubernetes's node label
@@ -290,17 +320,28 @@ Steps:
 #### validateServiceCmd
 asserts basic "service" command functionality
 
-Steps:
-- Create a new `k8s.gcr.io/echoserver` deployment
-- Run `minikube service list` to make sure the newly created service is correctly listed in the output
-- Run `minikube service` with `--https --url` to make sure the HTTPS endpoint URL of the service is printed
-- Run `minikube service` with `--url --format={{.IP}}` to make sure the IP address of the service is printed
-- Run `minikube service` with a regular `--url` to make sure the HTTP endpoint URL of the service is printed
+#### validateServiceCmdDeployApp
+Create a new `registry.k8s.io/echoserver` deployment
+
+#### validateServiceCmdList
+Run `minikube service list` to make sure the newly created service is correctly listed in the output
+
+#### validateServiceCmdJSON
+Run `minikube service list -o JSON` and make sure the services are correctly listed as JSON output
+
+#### validateServiceCmdHTTPS
+Run `minikube service` with `--https --url` to make sure the HTTPS endpoint URL of the service is printed
+
+#### validateServiceCmdFormat
+Run `minikube service` with `--url --format={{.IP}}` to make sure the IP address of the service is printed
+
+#### validateServiceCmdURL
+Run `minikube service` with a regular `--url` to make sure the HTTP endpoint URL of the service is printed
 
 #### validateServiceCmdConnect
 
 Steps:
-- Create a new `k8s.gcr.io/echoserver` deployment
+- Create a new `registry.k8s.io/echoserver` deployment
 - Run `minikube service` with a regular `--url` to make sure the HTTP endpoint URL of the service is printed
 - Make sure we can hit the endpoint URL with an HTTP GET request
 
@@ -383,8 +424,15 @@ Steps:
 asserts that the `minikube license` command downloads and untars the licenses
 Note: This test will fail on release PRs as the licenses file for the new version won't be uploaded at that point
 
+#### validateInvalidService
+makes sure minikube will not start a tunnel for an unavailable service that has no running pods
+
 #### validateMountCmd
 verifies the minikube mount command works properly
+for the platforms that support it, we're testing:
+- a generic 9p mount
+- a 9p mount on a specific port
+- cleaning-mechanism for profile-specific mounts
 
 #### validatePersistentVolumeClaim
 makes sure PVCs work properly
@@ -394,6 +442,9 @@ makes sure the minikube tunnel command works as expected
 
 #### validateTunnelStart
 starts `minikube tunnel`
+
+#### validateNoSecondTunnel
+ensures only 1 tunnel can run simultaneously
 
 #### validateServiceStable
 starts nginx pod, nginx service and waits nginx having loadbalancer ingress IP
@@ -422,14 +473,79 @@ verifies files and packages installed inside minikube ISO/Base image
 ## TestGvisorAddon
 tests the functionality of the gVisor addon
 
-## TestIngressAddonLegacy
-tests ingress and ingress-dns addons with legacy k8s version <1.19
+## TestMultiControlPlane
+tests all ha (multi-control plane) cluster functionality
 
-#### validateIngressAddonActivation
-tests ingress addon activation
+#### validateHAStartCluster
+ensures ha (multi-control plane) cluster can start.
 
-#### validateIngressDNSAddonActivation
-tests ingress-dns addon activation
+#### validateHADeployApp
+deploys an app to ha (multi-control plane) cluster and ensures all nodes can serve traffic.
+
+#### validateHAPingHostFromPods
+uses app previously deplyed by validateDeployAppToHACluster to verify its pods, located on different nodes, can resolve "host.minikube.internal".
+
+#### validateHAAddWorkerNode
+uses the minikube node add command to add a worker node to an existing ha (multi-control plane) cluster.
+
+#### validateHANodeLabels
+check if all node labels were configured correctly.
+
+Steps:
+- Get the node labels from the cluster with `kubectl get nodes`
+- check if all node labels matches with the expected Minikube labels: `minikube.k8s.io/*`
+
+#### validateHAStatusHAppy
+ensures minikube profile list outputs correct with ha (multi-control plane) clusters.
+
+#### validateHACopyFile
+ensures minikube cp works with ha (multi-control plane) clusters.
+
+#### validateHAStopSecondaryNode
+tests ha (multi-control plane) cluster by stopping a secondary control-plane node using minikube node stop command.
+
+#### validateHAStatusDegraded
+ensures minikube profile list outputs correct with ha (multi-control plane) clusters.
+
+#### validateHARestartSecondaryNode
+tests the minikube node start command on existing stopped secondary node.
+
+#### validateHARestartClusterKeepsNodes
+restarts minikube cluster and checks if the reported node list is unchanged.
+
+#### validateHADeleteSecondaryNode
+tests the minikube node delete command on secondary control-plane.
+note: currently, 'minikube status' subcommand relies on primary control-plane node and storage-provisioner only runs on a primary control-plane node.
+
+#### validateHAStopCluster
+runs minikube stop on a ha (multi-control plane) cluster.
+
+#### validateHARestartCluster
+verifies a soft restart on a ha (multi-control plane) cluster works.
+
+#### validateHAAddSecondaryNode
+uses the minikube node add command to add a secondary control-plane node to an existing ha (multi-control plane) cluster.
+
+## TestImageBuild
+makes sure the 'minikube image build' command works fine
+
+#### validateSetupImageBuild
+starts a cluster for the image builds
+
+#### validateNormalImageBuild
+is normal test case for minikube image build, with -t parameter
+
+#### validateNormalImageBuildWithSpecifiedDockerfile
+is normal test case for minikube image build, with -t and -f parameter
+
+#### validateImageBuildWithBuildArg
+is a test case building with --build-opt
+
+#### validateImageBuildWithBuildEnv
+is a test case building with --build-env
+
+#### validateImageBuildWithDockerIgnore
+is a test case building with .dockerignore
 
 ## TestJSONOutput
 makes sure json output works properly for the start, pause, unpause, and stop commands
@@ -451,6 +567,9 @@ verifies the docker driver and run with an existing network
 
 ## TestKicCustomSubnet
 verifies the docker/podman driver works with a custom subnet
+
+## TestKicStaticIP
+starts minikube with the static IP flag
 
 ## TestingKicBaseImage
 will return true if the integraiton test is running against a passed --base-image flag
@@ -485,7 +604,14 @@ uses the minikube node add command to add a node to an existing cluster
 make sure minikube profile list outputs correct with multinode clusters
 
 #### validateCopyFileWithMultiNode
-validateProfileListWithMultiNode make sure minikube profile list outputs correct with multinode clusters
+make sure minikube cp works with multinode clusters.
+
+#### validateMultiNodeLabels
+check if all node labels were configured correctly
+
+Steps:
+- Get the node labels from the cluster with `kubectl get nodes`
+- check if all node labels matches with the expected Minikube labels: `minikube.k8s.io/*`
 
 #### validateStopRunningNode
 tests the minikube node stop command
@@ -573,7 +699,7 @@ validates that profile list works with --no-kubernetes
 validates that minikube start with no args works.
 
 ## TestChangeNoneUser
-tests to make sure the CHANGE_MINIKUBE_NONE_USER environemt variable is respected
+tests to make sure the CHANGE_MINIKUBE_NONE_USER environment variable is respected
 and changes the minikube file permissions from root to the correct user.
 
 ## TestPause

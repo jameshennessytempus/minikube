@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"os"
@@ -38,9 +39,17 @@ import (
 	"github.com/docker/machine/libmachine/ssh"
 	"github.com/docker/machine/libmachine/state"
 	"github.com/pkg/errors"
-	"github.com/spf13/viper"
 
+	"k8s.io/klog/v2"
 	pkgdrivers "k8s.io/minikube/pkg/drivers"
+	"k8s.io/minikube/pkg/minikube/detect"
+	"k8s.io/minikube/pkg/minikube/exit"
+	"k8s.io/minikube/pkg/minikube/firewall"
+	"k8s.io/minikube/pkg/minikube/out"
+	"k8s.io/minikube/pkg/minikube/reason"
+	"k8s.io/minikube/pkg/minikube/style"
+	"k8s.io/minikube/pkg/network"
+	"k8s.io/minikube/pkg/util/retry"
 )
 
 const (
@@ -56,30 +65,33 @@ type Driver struct {
 	EnginePort int
 	FirstQuery bool
 
-	Memory          int
-	DiskSize        int
-	CPU             int
-	Program         string
-	BIOS            bool
-	CPUType         string
-	MachineType     string
-	Firmware        string
-	Display         bool
-	DisplayType     string
-	Nographic       bool
-	VirtioDrives    bool
-	Network         string
-	PrivateNetwork  string
-	Boot2DockerURL  string
-	CaCertPath      string
-	PrivateKeyPath  string
-	DiskPath        string
-	CacheMode       string
-	IOMode          string
-	UserDataFile    string
-	CloudConfigRoot string
-	LocalPorts      string
-	MACAddress      string
+	Memory                int
+	DiskSize              int
+	CPU                   int
+	Program               string
+	BIOS                  bool
+	CPUType               string
+	MachineType           string
+	Firmware              string
+	Display               bool
+	DisplayType           string
+	Nographic             bool
+	VirtioDrives          bool
+	Network               string
+	PrivateNetwork        string
+	Boot2DockerURL        string
+	CaCertPath            string
+	PrivateKeyPath        string
+	DiskPath              string
+	CacheMode             string
+	IOMode                string
+	UserDataFile          string
+	CloudConfigRoot       string
+	LocalPorts            string
+	MACAddress            string
+	SocketVMNetPath       string
+	SocketVMNetClientPath string
+	ExtraDisks            int
 }
 
 func (d *Driver) GetMachineName() string {
@@ -87,7 +99,7 @@ func (d *Driver) GetMachineName() string {
 }
 
 func (d *Driver) GetSSHHostname() (string, error) {
-	if d.Network == "user" {
+	if network.IsBuiltinQEMU(d.Network) {
 		return "localhost", nil
 	}
 	return d.IPAddress, nil
@@ -144,7 +156,7 @@ func NewDriver(hostName, storePath string) drivers.Driver {
 }
 
 func (d *Driver) GetIP() (string, error) {
-	if d.Network == "user" {
+	if network.IsBuiltinQEMU(d.Network) {
 		return "127.0.0.1", nil
 	}
 	return d.IPAddress, nil
@@ -168,24 +180,32 @@ func checkPid(pid int) error {
 }
 
 func (d *Driver) GetState() (state.State, error) {
-	if _, err := os.Stat(d.pidfilePath()); err != nil {
-		return state.Stopped, nil
+	if runtime.GOOS != "windows" {
+		if _, err := os.Stat(d.pidfilePath()); err != nil {
+			return state.Stopped, nil
+		}
+		p, err := os.ReadFile(d.pidfilePath())
+		if err != nil {
+			return state.Error, err
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(p)))
+		if err != nil {
+			return state.Error, err
+		}
+		if err := checkPid(pid); err != nil {
+			// No pid, remove pidfile
+			os.Remove(d.pidfilePath())
+			return state.Stopped, nil
+		}
 	}
-	p, err := os.ReadFile(d.pidfilePath())
-	if err != nil {
-		return state.Error, err
+	var ret map[string]interface{}
+	queryStatus := func() (err error) {
+		ret, err = d.RunQMPCommand("query-status")
+		return err
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(p)))
-	if err != nil {
-		return state.Error, err
-	}
-	if err := checkPid(pid); err != nil {
-		// No pid, remove pidfile
-		os.Remove(d.pidfilePath())
-		return state.Stopped, nil
-	}
-	ret, err := d.RunQMPCommand("query-status")
-	if err != nil {
+	// on arm64 Macs the monitor may refuse connection for a second after creating the cluster, resulting in addons
+	// not being enabled, a simple retry resolves this, see: https://github.com/kubernetes/minikube/issues/17396
+	if err := retry.Expo(queryStatus, 1*time.Second, 10*time.Second); err != nil {
 		return state.Error, err
 	}
 
@@ -212,7 +232,7 @@ func (d *Driver) PreCreateCheck() error {
 func (d *Driver) Create() error {
 	var err error
 	switch d.Network {
-	case "user":
+	case "builtin", "user":
 		minPort, maxPort, err := parsePortRange(d.LocalPorts)
 		log.Debugf("port range: %d -> %d", minPort, maxPort)
 		if err != nil {
@@ -262,6 +282,16 @@ func (d *Driver) Create() error {
 		}
 	}
 
+	if d.ExtraDisks > 0 {
+		log.Info("Creating extra disk images...")
+		for i := 0; i < d.ExtraDisks; i++ {
+			path := pkgdrivers.ExtraDiskPath(d.BaseDriver, i)
+			if err := pkgdrivers.CreateRawDisk(path, d.DiskSize); err != nil {
+				return err
+			}
+		}
+	}
+
 	log.Info("Starting QEMU VM...")
 	return d.Start()
 }
@@ -297,8 +327,8 @@ func parsePortRange(rawPortRange string) (int, int, error) {
 	return minPort, maxPort, nil
 }
 
-func getRandomPortNumberInRange(min, max int) int {
-	return rand.Intn(max-min) + min
+func getRandomPortNumberInRange(minimum, maximum int) int {
+	return rand.Intn(maximum-minimum) + minimum
 }
 
 func getAvailableTCPPortFromRange(minPort, maxPort int) (int, error) {
@@ -383,14 +413,11 @@ func (d *Driver) Start() error {
 	}
 
 	// hardware acceleration is important, it increases performance by 10x
-	if runtime.GOOS == "darwin" {
-		// On macOS, enable the Hypervisor framework accelerator.
+	accel := hardwareAcceleration()
+	if accel != "" {
+		klog.Infof("Using %s for hardware acceleration", accel)
 		startCmd = append(startCmd,
-			"-accel", "hvf")
-	} else if _, err := os.Stat("/dev/kvm"); err == nil && runtime.GOOS == "linux" {
-		// On Linux, enable the Kernel Virtual Machine accelerator.
-		startCmd = append(startCmd,
-			"-accel", "kvm")
+			"-accel", accel)
 	}
 
 	startCmd = append(startCmd,
@@ -411,7 +438,7 @@ func (d *Driver) Start() error {
 	)
 
 	switch d.Network {
-	case "user":
+	case "builtin", "user":
 		startCmd = append(startCmd,
 			"-nic", fmt.Sprintf("user,model=virtio,hostfwd=tcp::%d-:22,hostfwd=tcp::%d-:2376,hostname=%s", d.SSHPort, d.EnginePort, d.GetMachineName()),
 		)
@@ -423,8 +450,10 @@ func (d *Driver) Start() error {
 		return fmt.Errorf("unknown network: %s", d.Network)
 	}
 
-	startCmd = append(startCmd,
-		"-daemonize")
+	if runtime.GOOS != "windows" {
+		startCmd = append(startCmd,
+			"-daemonize")
+	}
 
 	if d.CloudConfigRoot != "" {
 		startCmd = append(startCmd,
@@ -433,6 +462,15 @@ func (d *Driver) Start() error {
 		startCmd = append(startCmd,
 			"-device",
 			"virtio-9p-pci,id=fs0,fsdev=fsdev0,mount_tag=config-2")
+	}
+
+	for i := 0; i < d.ExtraDisks; i++ {
+		// use a higher index for extra disks to reduce ID collision with current or future
+		// low-indexed devices (e.g., firmware, ISO CDROM, cloud config, and network device)
+		index := i + 10
+		startCmd = append(startCmd,
+			"-drive", fmt.Sprintf("file=%s,index=%d,media=disk,format=raw,if=virtio", pkgdrivers.ExtraDiskPath(d.BaseDriver, i), index),
+		)
 	}
 
 	if d.VirtioDrives {
@@ -447,34 +485,34 @@ func (d *Driver) Start() error {
 	// If socket network, start with socket_vmnet.
 	startProgram := d.Program
 	if d.Network == "socket_vmnet" {
-		startProgram = viper.GetString("socket-vmnet-client-path")
-		socketVMnetPath := viper.GetString("socket-vmnet-path")
-		startCmd = append([]string{socketVMnetPath, d.Program}, startCmd...)
+		startProgram = d.SocketVMNetClientPath
+		startCmd = append([]string{d.SocketVMNetPath, d.Program}, startCmd...)
 	}
 
-	if stdout, stderr, err := cmdOutErr(startProgram, startCmd...); err != nil {
+	startFunc := cmdOutErr
+	if runtime.GOOS == "windows" {
+		startFunc = cmdStart
+	}
+	if stdout, stderr, err := startFunc(startProgram, startCmd...); err != nil {
 		fmt.Printf("OUTPUT: %s\n", stdout)
 		fmt.Printf("ERROR: %s\n", stderr)
 		return err
 	}
 
 	switch d.Network {
-	case "user":
+	case "builtin", "user":
 		d.IPAddress = "127.0.0.1"
 	case "socket_vmnet":
 		var err error
 		getIP := func() error {
-			// QEMU requires MAC address with leading 0s
-			// But socket_vmnet writes the MAC address to the dhcp leases file with leading 0s stripped
-			mac := pkgdrivers.TrimMacAddress(d.MACAddress)
-			d.IPAddress, err = pkgdrivers.GetIPAddressByMACAddress(mac)
+			d.IPAddress, err = pkgdrivers.GetIPAddressByMACAddress(d.MACAddress)
 			if err != nil {
 				return errors.Wrap(err, "failed to get IP address")
 			}
 			return nil
 		}
 		// Implement a retry loop because IP address isn't added to dhcp leases file immediately
-		for i := 0; i < 30; i++ {
+		for i := 0; i < 60; i++ {
 			log.Debugf("Attempt %d", i)
 			err = getIP()
 			if err == nil {
@@ -483,15 +521,46 @@ func (d *Driver) Start() error {
 			time.Sleep(2 * time.Second)
 		}
 
-		if err != nil {
+		if err == nil {
+			log.Debugf("IP: %s", d.IPAddress)
+			break
+		}
+		if !isBootpdError(err) {
 			return errors.Wrap(err, "IP address never found in dhcp leases file")
 		}
-		log.Debugf("IP: %s", d.IPAddress)
+		if unblockErr := firewall.UnblockBootpd(); unblockErr != nil {
+			klog.Errorf("failed unblocking bootpd from firewall: %v", unblockErr)
+			exit.Error(reason.IfBootpdFirewall, "ip not found", err)
+		}
+		out.Styled(style.Restarting, "Successfully unblocked bootpd process from firewall, retrying")
+		return fmt.Errorf("ip not found: %v", err)
 	}
 
 	log.Infof("Waiting for VM to start (ssh -p %d docker@%s)...", d.SSHPort, d.IPAddress)
 
 	return WaitForTCPWithDelay(fmt.Sprintf("%s:%d", d.IPAddress, d.SSHPort), time.Second)
+}
+
+func hardwareAcceleration() string {
+	if detect.IsAmd64M1Emulation() {
+		return "tcg"
+	}
+	if runtime.GOOS == "darwin" {
+		// On macOS, enable the Hypervisor framework accelerator.
+		return "hvf"
+	}
+	if _, err := os.Stat("/dev/kvm"); err == nil && runtime.GOOS == "linux" {
+		// On Linux, enable the Kernel Virtual Machine accelerator.
+		return "kvm"
+	}
+	return ""
+}
+
+func isBootpdError(err error) bool {
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	return strings.Contains(err.Error(), "could not find an IP address")
 }
 
 func cmdOutErr(cmdStr string, args ...string) (string, string, error) {
@@ -509,6 +578,8 @@ func cmdOutErr(cmdStr string, args ...string) (string, string, error) {
 	if err != nil {
 		if ee, ok := err.(*exec.Error); ok && ee == exec.ErrNotFound {
 			err = fmt.Errorf("mystery error: %v", ee)
+		} else {
+			err = fmt.Errorf("%s: %v", strings.Trim(stderrStr, "\n"), err)
 		}
 	} else {
 		// also catch error messages in stderr, even if the return code looks OK
@@ -517,6 +588,12 @@ func cmdOutErr(cmdStr string, args ...string) (string, string, error) {
 		}
 	}
 	return stdoutStr, stderrStr, err
+}
+
+func cmdStart(cmdStr string, args ...string) (string, string, error) {
+	cmd := exec.Command(cmdStr, args...)
+	log.Debugf("executing: %s %s", cmdStr, strings.Join(args, " "))
+	return "", "", cmd.Start()
 }
 
 func (d *Driver) Stop() error {
@@ -791,7 +868,7 @@ func WaitForTCPWithDelay(addr string, duration time.Duration) error {
 			continue
 		}
 		defer conn.Close()
-		if _, err := conn.Read(make([]byte, 1)); err != nil {
+		if _, err := conn.Read(make([]byte, 1)); err != nil && err != io.EOF {
 			time.Sleep(duration)
 			continue
 		}

@@ -25,6 +25,7 @@
 set -x
 
 gcloud cloud-shell ssh --authorize-session << EOF
+ sudo rm -rf .cache .kube out testdata go
  OS="linux"
  ARCH="amd64"
  DRIVER="docker"
@@ -33,13 +34,17 @@ gcloud cloud-shell ssh --authorize-session << EOF
  EXTRA_TEST_ARGS="-test.run (TestFunctional|TestAddons|TestStartStop)"
 
  # Need to set these in cloud-shell or will not be present in common.sh
- MINIKUBE_LOCATION=$MINIKUBE_LOCATION
- COMMIT=$COMMIT
- EXTRA_BUILD_ARGS=$EXTRA_BUILD_ARGS
- access_token=$access_token
- ROOT_JOB_ID=$ROOT_JOB_ID
+ MINIKUBE_LOCATION="$MINIKUBE_LOCATION"
+ COMMIT="$COMMIT"
+ EXTRA_BUILD_ARGS="$EXTRA_BUILD_ARGS"
+ access_token="$access_token"
+ ROOT_JOB_ID="$ROOT_JOB_ID"
+ GOPOGH_DB_BACKEND="$GOPOGH_DB_BACKEND"
+ GOPOGH_DB_HOST="$GOPOGH_DB_HOST"
+ GOPOGH_DB_PATH="$GOPOGH_DB_PATH"
 
  # Prevent cloud-shell is ephemeral warnings on apt-get
+ mkdir ~/.cloudshell
  touch ~/.cloudshell/no-apt-get-warning
 
  gsutil -m cp -r gs://minikube-builds/${MINIKUBE_LOCATION}/installers .

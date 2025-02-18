@@ -48,36 +48,31 @@ func TestPreload(t *testing.T) {
 
 	// Now, pull the busybox image into minikube
 	image := "gcr.io/k8s-minikube/busybox"
-	var cmd *exec.Cmd
-	if ContainerRuntime() == "docker" {
-		cmd = exec.CommandContext(ctx, Target(), "ssh", "-p", profile, "--", "docker", "pull", image)
-	} else {
-		cmd = exec.CommandContext(ctx, Target(), "ssh", "-p", profile, "--", "sudo", "crictl", "pull", image)
-	}
+	cmd := exec.CommandContext(ctx, Target(), "-p", profile, "image", "pull", image)
 	rr, err = Run(t, cmd)
 	if err != nil {
 		t.Fatalf("%s failed: %v", rr.Command(), err)
 	}
 
-	// Restart minikube with v1.24.6, which has a preloaded tarball
+	// stop the cluster
+	rr, err = Run(t, exec.CommandContext(ctx, Target(), "stop", "-p", profile))
+	if err != nil {
+		t.Fatalf("%s failed: %v", rr.Command(), err)
+	}
+
+	// re-start the cluster and check if image is preserved
 	startArgs = []string{"start", "-p", profile, "--memory=2200", "--alsologtostderr", "-v=1", "--wait=true"}
 	startArgs = append(startArgs, StartArgs()...)
-	k8sVersion = "v1.24.6"
-	startArgs = append(startArgs, fmt.Sprintf("--kubernetes-version=%s", k8sVersion))
 	rr, err = Run(t, exec.CommandContext(ctx, Target(), startArgs...))
 	if err != nil {
 		t.Fatalf("%s failed: %v", rr.Command(), err)
 	}
-	if ContainerRuntime() == "docker" {
-		cmd = exec.CommandContext(ctx, Target(), "ssh", "-p", profile, "--", "docker", "images")
-	} else {
-		cmd = exec.CommandContext(ctx, Target(), "ssh", "-p", profile, "--", "sudo", "crictl", "image", "ls")
-	}
+	cmd = exec.CommandContext(ctx, Target(), "-p", profile, "image", "list")
 	rr, err = Run(t, cmd)
 	if err != nil {
 		t.Fatalf("%s failed: %v", rr.Command(), err)
 	}
 	if !strings.Contains(rr.Output(), image) {
-		t.Fatalf("Expected to find %s in output of `docker images`, instead got %s", image, rr.Output())
+		t.Fatalf("Expected to find %s in image list output, instead got %s", image, rr.Output())
 	}
 }

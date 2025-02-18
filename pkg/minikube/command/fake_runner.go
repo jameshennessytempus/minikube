@@ -163,7 +163,7 @@ func (f *FakeCommandRunner) Remove(file assets.CopyableFile) error {
 }
 
 // ReadableFile implements interface (without implementation)
-func (f *FakeCommandRunner) ReadableFile(sourcePath string) (assets.ReadableFile, error) {
+func (f *FakeCommandRunner) ReadableFile(_ string) (assets.ReadableFile, error) {
 	return nil, nil
 }
 
@@ -193,7 +193,7 @@ func (f *FakeCommandRunner) GetFileToContents(filename string) (string, error) {
 
 func (f *FakeCommandRunner) commands() []string {
 	cmds := []string{}
-	f.cmdMap.Range(func(k, v interface{}) bool {
+	f.cmdMap.Range(func(k, _ interface{}) bool {
 		cmds = append(cmds, fmt.Sprintf("%s", k))
 		return true
 	})
@@ -208,7 +208,7 @@ func (f *FakeCommandRunner) DumpMaps(w io.Writer) {
 		return true
 	})
 	fmt.Fprintln(w, "Filenames: ")
-	f.fileMap.Range(func(k, v interface{}) bool {
+	f.fileMap.Range(func(k, _ interface{}) bool {
 		fmt.Fprint(w, k)
 		return true
 	})

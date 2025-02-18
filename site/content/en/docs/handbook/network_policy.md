@@ -32,7 +32,7 @@ It is possible to replace the CNI on a running minikube cluster, but it is signi
 
 The [Kubernetes documentation on declaring network policy](https://kubernetes.io/docs/tasks/administer-cluster/declare-network-policy/) is a good place to start to understand the possibilities. In addition, the tutorials in [Further reading]({{< ref "#further-reading" >}}) below give much more guidance. 
 
-The YAML below from the [Kubernetes NetworkPolicies](https://kubernetes.io/docs/concepts/services-networking/network-policies/#default-deny-all-ingress-traffic) documentation shows a very simple default ingress isolation policy or a namespace by creating a NetworkPolicy that selects all pods but does not allow any ingress traffic to those pods.
+The YAML below from the [Kubernetes NetworkPolicies](https://kubernetes.io/docs/concepts/services-networking/network-policies/#default-deny-all-ingress-traffic) documentation shows a very simple default ingress isolation policy on a namespace by creating a NetworkPolicy that selects all pods but does not allow any ingress traffic to those pods.
 
 ```yaml
 ---
@@ -67,6 +67,6 @@ spec:
 
 ## Further reading
 
-This [Advanced Kubernetes policy tutorial](https://projectcalico.docs.tigera.io/security/tutorials/kubernetes-policy-advanced) gives an example of what can be achieved with Kubernetes network policy. It walks through using Kubernetes NetworkPolicy to define more complex network policies.
+This [Advanced Kubernetes policy tutorial](https://docs.tigera.io/calico/latest/network-policy/get-started/kubernetes-policy/kubernetes-policy-advanced) gives an example of what can be achieved with Kubernetes network policy. It walks through using Kubernetes NetworkPolicy to define more complex network policies.
 
 This [Calico policy tutorial](https://projectcalico.docs.tigera.io/security/tutorials/calico-policy) demonstrates the extended functionalities Calico network policy offers over and above vanilla Kubernetes network policies. To demonstrate this, this tutorial follows a similar approach to the tutorial above, but instead uses Calico network policies and highlights differences between the two policy types, making use of features that are not available in Kubernetes network policies. 

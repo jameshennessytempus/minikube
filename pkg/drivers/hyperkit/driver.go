@@ -67,7 +67,7 @@ type Driver struct {
 }
 
 // NewDriver creates a new driver for a host
-func NewDriver(hostName, storePath string) *Driver {
+func NewDriver(_, _ string) *Driver {
 	return &Driver{
 		BaseDriver: &drivers.BaseDriver{
 			SSHUser: "docker",
@@ -261,8 +261,6 @@ func (d *Driver) Start() error {
 		return errors.Wrap(err, "getting MAC address from UUID")
 	}
 
-	// Need to strip 0's
-	mac = pkgdrivers.TrimMacAddress(mac)
 	log.Debugf("Generated MAC %s", mac)
 
 	log.Debugf("Starting with cmdline: %s", d.Cmdline)
@@ -427,7 +425,7 @@ func (d *Driver) extractKernel(isoPath string) error {
 		{"/boot/initrd", "initrd"},
 	} {
 		fullDestPath := d.ResolveStorePath(f.destPath)
-		if err := ExtractFile(isoPath, f.pathInIso, fullDestPath); err != nil {
+		if err := pkgdrivers.ExtractFile(isoPath, f.pathInIso, fullDestPath); err != nil {
 			return err
 		}
 	}

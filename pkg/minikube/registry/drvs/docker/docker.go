@@ -33,6 +33,7 @@ import (
 	"k8s.io/minikube/pkg/drivers/kic"
 	"k8s.io/minikube/pkg/drivers/kic/oci"
 	"k8s.io/minikube/pkg/minikube/config"
+	"k8s.io/minikube/pkg/minikube/detect"
 	"k8s.io/minikube/pkg/minikube/driver"
 	"k8s.io/minikube/pkg/minikube/localpath"
 	"k8s.io/minikube/pkg/minikube/registry"
@@ -88,37 +89,16 @@ func configure(cc config.ClusterConfig, n config.Node) (interface{}, error) {
 		ExtraArgs:         extraArgs,
 		Network:           cc.Network,
 		Subnet:            cc.Subnet,
+		StaticIP:          cc.StaticIP,
 		ListenAddress:     cc.ListenAddress,
+		GPUs:              cc.GPUs,
 	}), nil
 }
 
 func status() (retState registry.State) {
-	_, err := exec.LookPath(oci.Docker)
-	if err != nil {
-		return registry.State{Error: err, Installed: false, Healthy: false, Fix: "Install Docker", Doc: docURL}
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, oci.Docker, "version", "--format", "{{.Server.Os}}-{{.Server.Version}}")
-	o, err := cmd.Output()
-	if err != nil {
-		reason := ""
-		if ctx.Err() == context.DeadlineExceeded {
-			err = errors.Wrapf(err, "deadline exceeded running %q", strings.Join(cmd.Args, " "))
-			reason = "PROVIDER_DOCKER_DEADLINE_EXCEEDED"
-		}
-
-		klog.Warningf("docker version returned error: %v", err)
-
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			stderr := strings.TrimSpace(string(exitErr.Stderr))
-			newErr := fmt.Errorf(`%q %v: %s`, strings.Join(cmd.Args, " "), exitErr, stderr)
-			return suggestFix("version", exitErr.ExitCode(), stderr, newErr)
-		}
-
-		return registry.State{Reason: reason, Error: err, Installed: true, Healthy: false, Fix: "Restart the Docker service", Doc: docURL}
+	version, state := dockerVersionOrState()
+	if state.Error != nil {
+		return state
 	}
 
 	var improvement string
@@ -134,9 +114,18 @@ func status() (retState registry.State) {
 		}
 	}()
 
-	klog.Infof("docker version: %s", o)
+	versions := strings.Split(version, ":")
+	if len(versions) < 2 {
+		versions = append(versions, "")
+	}
+	dockerEngineVersion := versions[0]
+	dockerPlatformVersion := versions[1]
+	klog.Infof("docker version: %s", version)
 	if !viper.GetBool("force") {
-		s := checkDockerVersion(strings.TrimSpace(string(o))) // remove '\n' from o at the end
+		if s := checkDockerDesktopVersion(dockerPlatformVersion); s.Error != nil {
+			return s
+		}
+		s := checkDockerEngineVersion(dockerEngineVersion)
 		if s.Error != nil {
 			return s
 		}
@@ -158,7 +147,50 @@ func status() (retState registry.State) {
 	return checkNeedsImprovement()
 }
 
-func checkDockerVersion(o string) registry.State {
+var dockerVersionOrState = func() (string, registry.State) {
+	if _, err := exec.LookPath(oci.Docker); err != nil {
+		return "", registry.State{Error: err, Installed: false, Healthy: false, Fix: "Install Docker", Doc: docURL}
+	}
+
+	if detect.IsAmd64M1Emulation() {
+		return "", registry.State{
+			Reason:    "PROVIDER_DOCKER_INCORRECT_ARCH",
+			Installed: true,
+			Running:   true,
+			Error:     errors.New("Cannot use amd64 minikube binary to start minikube cluster with Docker driver on arm64 machine"),
+			Fix:       "Download and use arm64 version of the minikube binary",
+			Doc:       "https://minikube.sigs.k8s.io/docs/start/",
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, oci.Docker, "version", "--format", "{{.Server.Os}}-{{.Server.Version}}:{{.Server.Platform.Name}}")
+	o, err := cmd.Output()
+	if err == nil {
+		return string(o), registry.State{}
+	}
+
+	reason := ""
+	if ctx.Err() == context.DeadlineExceeded {
+		err = errors.Wrapf(err, "deadline exceeded running %q", strings.Join(cmd.Args, " "))
+		reason = "PROVIDER_DOCKER_DEADLINE_EXCEEDED"
+	}
+
+	klog.Warningf("docker version returned error: %v", err)
+
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		return "", registry.State{Reason: reason, Error: err, Installed: true, Healthy: false, Fix: "Restart the Docker service", Doc: docURL}
+	}
+
+	stderr := strings.TrimSpace(string(exitErr.Stderr))
+	newErr := fmt.Errorf(`%q %v: %s`, strings.Join(cmd.Args, " "), exitErr, stderr)
+	return "", suggestFix("version", exitErr.ExitCode(), stderr, newErr)
+}
+
+func checkDockerEngineVersion(o string) registry.State {
 	parts := strings.SplitN(o, "-", 2)
 	if len(parts) != 2 {
 		return registry.State{
@@ -237,6 +269,38 @@ func checkDockerVersion(o string) registry.State {
 		NeedsImprovement: true,
 		Fix:              hintUpdate,
 		Doc:              docURL + "#requirements"}
+}
+
+func checkDockerDesktopVersion(version string) (s registry.State) {
+	fields := strings.Fields(version)
+	if len(fields) < 3 || fields[0] != "Docker" || fields[1] != "Desktop" {
+		return s
+	}
+	currSemver, err := semver.Parse(fields[2])
+	if err != nil {
+		return s
+	}
+	if currSemver.EQ(semver.MustParse("4.16.0")) {
+		return registry.State{
+			Reason:    "PROVIDER_DOCKER_DESKTOP_VERSION_BAD",
+			Running:   true,
+			Error:     errors.New("Docker Desktop 4.16.0 has a regression that prevents minikube from starting"),
+			Installed: true,
+			Fix:       "Update Docker Desktop to 4.16.1 or greater",
+		}
+	}
+
+	if runtime.GOOS == "darwin" && currSemver.EQ(semver.MustParse("4.34.0")) {
+		return registry.State{
+			Reason:    "PROVIDER_DOCKER_DESKTOP_VERSION_BAD",
+			Running:   true,
+			Error:     errors.New("Docker Desktop 4.34.0 has a regression that prevents minikube from listing the containers"),
+			Installed: true,
+			Fix:       "Use a different Docker desktop version, more info at https://github.com/docker/cli/issues/5412",
+		}
+	}
+
+	return s
 }
 
 // checkNeedsImprovement if overlay mod is installed on a system

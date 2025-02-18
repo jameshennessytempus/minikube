@@ -43,13 +43,13 @@ if ! [[ "${VERSION_BUILD}" =~ ^[0-9]+$ ]]; then
   go run "${DIR}/release_update_releases_json.go" --releases-file deploy/minikube/releases-beta.json --version "$TAGNAME" --legacy
   go run "${DIR}/release_update_releases_json.go" --releases-file deploy/minikube/releases-beta-v2.json --version "$TAGNAME" > binary_checksums.txt
 
-  git add -A
+  git add deploy/minikube/*
   git commit -m "Update releases-beta.json & releases-beta-v2.json to include ${TAGNAME}"
   git remote add minikube-bot git@github.com:minikube-bot/minikube.git
   git push -f minikube-bot jenkins-releases.json-${TAGNAME}
 
   # Send PR from minikube-bot/minikube to kubernetes/minikube
-  curl -X POST -u minikube-bot:${BOT_PASSWORD} -k   -d "{\"title\": \"update releases-beta.json & releases-beta-v2.json to include ${TAGNAME}\",\"head\": \"minikube-bot:jenkins-releases.json-${TAGNAME}\",\"base\": \"master\"}" https://api.github.com/repos/kubernetes/minikube/pulls
+  curl -X POST -u minikube-bot:${BOT_PASSWORD} -k   -d "{\"title\": \"Post-release: update releases-beta.json & releases-beta-v2.json to include ${TAGNAME}\",\"head\": \"minikube-bot:jenkins-releases.json-${TAGNAME}\",\"base\": \"master\"}" https://api.github.com/repos/kubernetes/minikube/pulls
 
   # Upload file to GCS so that minikube can see the new version
   gsutil cp deploy/minikube/releases-beta.json gs://minikube/releases-beta.json
@@ -68,7 +68,7 @@ else
   git push -f minikube-bot jenkins-releases.json-${TAGNAME}
 
   # Send PR from minikube-bot/minikube to kubernetes/minikube
-  curl -X POST -u minikube-bot:${BOT_PASSWORD} -k   -d "{\"title\": \"update releases.json & releases-v2.json to include ${TAGNAME}\",\"head\": \"minikube-bot:jenkins-releases.json-${TAGNAME}\",\"base\": \"master\"}" https://api.github.com/repos/kubernetes/minikube/pulls
+  curl -X POST -u minikube-bot:${BOT_PASSWORD} -k   -d "{\"title\": \"Post-release: update releases.json & releases-v2.json to include ${TAGNAME}\",\"head\": \"minikube-bot:jenkins-releases.json-${TAGNAME}\",\"base\": \"master\"}" https://api.github.com/repos/kubernetes/minikube/pulls
 
   # Upload file to GCS so that minikube can see the new version
   gsutil cp deploy/minikube/releases.json gs://minikube/releases.json

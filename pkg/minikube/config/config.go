@@ -44,6 +44,8 @@ const (
 	ProfileName = "profile"
 	// UserFlag is the key for the global user flag (ex. --user=user1)
 	UserFlag = "user"
+	// SkipAuditFlag is the key for skipping command from aduit
+	SkipAuditFlag = "skip-audit"
 	// Rootless is the key for the global rootless parameter (boolean)
 	Rootless = "rootless"
 	// AddonImages stores custom addon images config
@@ -242,10 +244,13 @@ func MultiNode(cc ClusterConfig) bool {
 	if len(cc.Nodes) > 1 {
 		return true
 	}
+	return viper.GetInt("nodes") > 1
+}
 
-	if viper.GetInt("nodes") > 1 {
+// IsHA returns true if ha (multi-control plane) cluster is requested.
+func IsHA(cc ClusterConfig) bool {
+	if len(ControlPlanes(cc)) > 1 {
 		return true
 	}
-
-	return false
+	return viper.GetBool("ha")
 }

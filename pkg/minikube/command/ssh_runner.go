@@ -87,7 +87,7 @@ func (s *sshReadableFile) Read(p []byte) (int, error) {
 	return s.reader.Read(p)
 }
 
-func (s *sshReadableFile) Seek(offset int64, whence int) (int64, error) {
+func (s *sshReadableFile) Seek(_ int64, _ int) (int64, error) {
 	return 0, fmt.Errorf("Seek is not implemented for sshReadableFile")
 }
 
@@ -383,8 +383,6 @@ func (s *SSHRunner) Copy(f assets.CopyableFile) error {
 	// The scpcmd below *should not* return until all data is copied and the
 	// StdinPipe is closed. But let's use errgroup to make it explicit.
 	var g errgroup.Group
-	var copied int64
-
 	g.Go(func() error {
 		defer w.Close()
 		header := fmt.Sprintf("C%s %d %s\n", f.GetPermissions(), f.GetLength(), f.GetTargetName())
@@ -395,7 +393,7 @@ func (s *SSHRunner) Copy(f assets.CopyableFile) error {
 			return nil
 		}
 
-		copied, err = io.Copy(w, f)
+		copied, err := io.Copy(w, f)
 		if err != nil {
 			return errors.Wrap(err, "io.Copy")
 		}
@@ -406,7 +404,7 @@ func (s *SSHRunner) Copy(f assets.CopyableFile) error {
 		return nil
 	})
 
-	scp := fmt.Sprintf("sudo test -d %s && sudo scp -t %s", f.GetTargetDir(), f.GetTargetDir())
+	scp := fmt.Sprintf("sudo mkdir -p %s && sudo scp -t %s", f.GetTargetDir(), f.GetTargetDir())
 	mtime, err := f.GetModTime()
 	if err != nil {
 		klog.Infof("error getting modtime for %s: %v", dst, err)
@@ -501,7 +499,7 @@ func (s *SSHRunner) CopyFrom(f assets.CopyableFile) error {
 
 // ReadableFile returns assets.ReadableFile for the sourcePath (via `stat` command)
 func (s *SSHRunner) ReadableFile(sourcePath string) (assets.ReadableFile, error) {
-	klog.V(4).Infof("NewsshReadableFile: %s -> %s", sourcePath)
+	klog.V(4).Infof("NewsshReadableFile: %s", sourcePath)
 
 	if !strings.HasPrefix(sourcePath, "/") {
 		return nil, fmt.Errorf("sourcePath must be an absolute Path. Relative Path is not allowed")

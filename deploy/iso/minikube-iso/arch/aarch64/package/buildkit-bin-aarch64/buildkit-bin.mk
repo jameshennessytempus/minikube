@@ -4,13 +4,13 @@
 #
 ################################################################################
 
-BUILDKIT_BIN_AARCH64_VERSION = v0.10.3
-BUILDKIT_BIN_AARCH64_COMMIT = c8d25d9a103b70dc300a4fd55e7e576472284e31
+BUILDKIT_BIN_AARCH64_VERSION = v0.18.1
+BUILDKIT_BIN_AARCH64_COMMIT = eb68885955169461d72dc2b7e6d084100fcaba86
 BUILDKIT_BIN_AARCH64_SITE = https://github.com/moby/buildkit/releases/download/$(BUILDKIT_BIN_AARCH64_VERSION)
 BUILDKIT_BIN_AARCH64_SOURCE = buildkit-$(BUILDKIT_BIN_AARCH64_VERSION).linux-arm64.tar.gz
 
 # https://github.com/opencontainers/runc.git
-BUILDKIT_RUNC_VERSION = 12644e614e25b05da6fd08a38ffa0cfe1903fdec
+BUILDKIT_RUNC_VERSION = 5fd4c4d144137e991c4acebb2146ab1483a97925
 
 define BUILDKIT_BIN_AARCH64_USERS
 	- -1 buildkit -1 - - - - -

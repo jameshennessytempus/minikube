@@ -17,6 +17,7 @@ limitations under the License.
 package addons
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"path"
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	"github.com/blang/semver/v4"
+	"github.com/docker/machine/libmachine/state"
 	"github.com/pkg/errors"
 	"github.com/spf13/viper"
 
@@ -35,9 +37,11 @@ import (
 	"k8s.io/minikube/pkg/drivers/kic/oci"
 	"k8s.io/minikube/pkg/kapi"
 	"k8s.io/minikube/pkg/minikube/assets"
+	"k8s.io/minikube/pkg/minikube/cluster"
 	"k8s.io/minikube/pkg/minikube/command"
 	"k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/constants"
+	"k8s.io/minikube/pkg/minikube/cruntime"
 	"k8s.io/minikube/pkg/minikube/driver"
 	"k8s.io/minikube/pkg/minikube/exit"
 	"k8s.io/minikube/pkg/minikube/machine"
@@ -76,6 +80,8 @@ func RunCallbacks(cc *config.ClusterConfig, name string, value string) error {
 		return errors.Wrap(err, "running validations")
 	}
 
+	preStartMessages(name, value)
+
 	// Run any callbacks for this property
 	if err := run(cc, name, value, a.callbacks); err != nil {
 		if errors.Is(err, ErrSkipThisAddon) {
@@ -83,7 +89,86 @@ func RunCallbacks(cc *config.ClusterConfig, name string, value string) error {
 		}
 		return errors.Wrap(err, "running callbacks")
 	}
+
+	postStartMessages(cc, name, value)
+
 	return nil
+}
+
+func preStartMessages(name, value string) {
+	if value != "true" {
+		return
+	}
+	switch name {
+	case "ambassador":
+		out.Styled(style.Warning, "The ambassador addon has stopped working as of v1.23.0, for more details visit: https://github.com/datawire/ambassador-operator/issues/73")
+	case "olm":
+		out.Styled(style.Warning, "The OLM addon has stopped working, for more details visit: https://github.com/operator-framework/operator-lifecycle-manager/issues/2534")
+	case "nvidia-gpu-device-plugin":
+		out.Styled(style.Warning, "The nvidia-gpu-device-plugin addon is deprecated and it's functionality is merged inside of nvidia-device-plugin addon. It will be removed in a future release. Please use the nvidia-device-plugin addon instead. For more details, visit: https://github.com/kubernetes/minikube/issues/19114.")
+	}
+}
+
+func postStartMessages(cc *config.ClusterConfig, name, value string) {
+	if value != "true" {
+		return
+	}
+	clusterName := cc.Name
+	tipProfileArg := ""
+	if clusterName != constants.DefaultClusterName {
+		tipProfileArg = fmt.Sprintf(" -p %s", clusterName)
+	}
+	switch name {
+	case "dashboard":
+		out.Styled(style.Tip, `Some dashboard features require the metrics-server addon. To enable all features please run:
+
+	minikube{{.profileArg}} addons enable metrics-server
+`, out.V{"profileArg": tipProfileArg})
+	case "headlamp":
+		out.Styled(style.Tip, `To access Headlamp, use the following command:
+
+	minikube{{.profileArg}} service headlamp -n headlamp
+`, out.V{"profileArg": tipProfileArg})
+		tokenGenerationTip := "To authenticate in Headlamp, fetch the Authentication Token using the following command:"
+		createSvcAccountToken := "kubectl create token headlamp --duration 24h -n headlamp"
+		getSvcAccountToken := `export SECRET=$(kubectl get secrets --namespace headlamp -o custom-columns=":metadata.name" | grep "headlamp-token")
+kubectl get secret $SECRET --namespace headlamp --template=\{\{.data.token\}\} | base64 --decode`
+
+		clusterVersion := cc.KubernetesConfig.KubernetesVersion
+		parsedClusterVersion, err := util.ParseKubernetesVersion(clusterVersion)
+		if err != nil {
+			tokenGenerationTip = fmt.Sprintf("%s\nIf Kubernetes Version is <1.24:\n%s\n\nIf Kubernetes Version is >=1.24:\n%s\n", tokenGenerationTip, createSvcAccountToken, getSvcAccountToken)
+		} else {
+			if parsedClusterVersion.GTE(semver.Version{Major: 1, Minor: 24}) {
+				tokenGenerationTip = fmt.Sprintf("%s\n\n        %s", tokenGenerationTip, createSvcAccountToken)
+			} else {
+				tokenGenerationTip = fmt.Sprintf("%s\n\n        %s", tokenGenerationTip, getSvcAccountToken)
+			}
+		}
+		out.Styled(style.Tip, fmt.Sprintf("%s\n", tokenGenerationTip))
+		out.Styled(style.Tip, `Headlamp can display more detailed information when metrics-server is installed. To install it, run:
+
+	minikube{{.profileArg}} addons enable metrics-server
+`, out.V{"profileArg": tipProfileArg})
+	case "yakd":
+		out.Styled(style.Tip, `To access YAKD - Kubernetes Dashboard, wait for Pod to be ready and run the following command:
+
+	minikube{{.profileArg}} service yakd-dashboard -n yakd-dashboard
+`, out.V{"profileArg": tipProfileArg})
+	}
+}
+
+// Deprecations if the selected addon is deprecated return the replacement addon, otherwise return the passed in addon
+func Deprecations(name string) (bool, string, string) {
+	switch name {
+	case "heapster":
+		return true, "metrics-server", "using metrics-server addon, heapster is deprecated"
+	case "efk":
+		return true, "", "The current images used in the efk addon contain Log4j vulnerabilities, the addon will be disabled until images are updated, see: https://github.com/kubernetes/minikube/issues/15280"
+	case "nvidia-gpu-device-plugin":
+		return true, "nvidia-device-plugin", "The nvidia-gpu-device-plugin addon is deprecated and it's functionality is merged inside of nvidia-device-plugin addon. It will be removed in a future release. Please use the nvidia-device-plugin addon instead. For more details, visit: https://github.com/kubernetes/minikube/issues/19114."
+	}
+	return false, "", ""
 }
 
 // Set sets a value in the config (not threadsafe)
@@ -171,9 +256,9 @@ func EnableOrDisableAddon(cc *config.ClusterConfig, name string, val string) err
 	}
 	defer api.Close()
 
-	cp, err := config.PrimaryControlPlane(cc)
+	cp, err := config.ControlPlane(*cc)
 	if err != nil {
-		exit.Error(reason.GuestCpConfig, "Error getting primary control plane", err)
+		exit.Error(reason.GuestCpConfig, "Error getting control-plane node", err)
 	}
 
 	// maintain backwards compatibility for ingress and ingress-dns addons with k8s < v1.19
@@ -275,6 +360,11 @@ func addonSpecificChecks(cc *config.ClusterConfig, name string, enable bool, run
 		}
 	}
 
+	// we cannot use volcano for crio
+	if name == "volcano" && cc.KubernetesConfig.ContainerRuntime == constants.CRIO && enable {
+		return false, fmt.Errorf("volcano addon does not support crio")
+	}
+
 	return false, nil
 }
 
@@ -307,7 +397,7 @@ func supportLegacyIngress(addon *assets.Addon, cc config.ClusterConfig) error {
 				"KubeWebhookCertgenPatch":  "docker.io/jettech/kube-webhook-certgen:v1.5.1@sha256:950833e19ade18cd389d647efb88992a7cc077abedef343fa59e012d376d79b7",
 			}
 			addon.Registries = map[string]string{
-				"IngressController": "k8s.gcr.io",
+				"IngressController": "registry.k8s.io",
 			}
 			return nil
 		}
@@ -359,11 +449,17 @@ func enableOrDisableAddonInternal(cc *config.ClusterConfig, addon *assets.Addon,
 		}
 	}
 
+	// on the first attempt try without force, but on subsequent attempts use force
+	force := false
+
 	// Retry, because sometimes we race against an apiserver restart
 	apply := func() error {
-		_, err := runner.RunCmd(kubectlCommand(cc, deployFiles, enable))
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		_, err := runner.RunCmd(kubectlCommand(ctx, cc, deployFiles, enable, force))
 		if err != nil {
 			klog.Warningf("apply failed, will retry: %v", err)
+			force = true
 		}
 		return err
 	}
@@ -404,38 +500,19 @@ func verifyAddonStatusInternal(cc *config.ClusterConfig, name string, val string
 	return nil
 }
 
-// Start enables the default addons for a profile, plus any additional
-func Start(wg *sync.WaitGroup, cc *config.ClusterConfig, toEnable map[string]bool, additional []string) {
+// Enable tries to enable the default addons for a profile plus any additional, and returns a single slice of all successfully enabled addons via channel (thread-safe).
+// Since Enable is called asynchronously (so is not thread-safe for concurrent addons map updating/reading), to avoid race conditions,
+// ToEnable should be called synchronously before Enable to get complete list of addons to enable, and
+// UpdateConfig should be called synchronously after Enable to update the config with successfully enabled addons.
+func Enable(wg *sync.WaitGroup, cc *config.ClusterConfig, toEnable map[string]bool, enabled chan<- []string) {
 	defer wg.Done()
 
 	start := time.Now()
-	klog.Infof("enableAddons start: toEnable=%v, additional=%s", toEnable, additional)
+	klog.Infof("enable addons start: toEnable=%v", toEnable)
+	var enabledAddons []string
 	defer func() {
-		klog.Infof("enableAddons completed in %s", time.Since(start))
+		klog.Infof("duration metric: took %s for enable addons: enabled=%v", time.Since(start), enabledAddons)
 	}()
-
-	// Get the default values of any addons not saved to our config
-	for name, a := range assets.Addons {
-		defaultVal := a.IsEnabled(cc)
-
-		_, exists := toEnable[name]
-		if !exists {
-			toEnable[name] = defaultVal
-		}
-	}
-
-	// Apply new addons
-	for _, name := range additional {
-		// replace heapster as metrics-server because heapster is deprecated
-		if name == "heapster" {
-			name = "metrics-server"
-		}
-		// if the specified addon doesn't exist, skip enabling
-		_, e := isAddonValid(name)
-		if e {
-			toEnable[name] = true
-		}
-	}
 
 	toEnableList := []string{}
 	for k, v := range toEnable {
@@ -446,8 +523,6 @@ func Start(wg *sync.WaitGroup, cc *config.ClusterConfig, toEnable map[string]boo
 	sort.Strings(toEnableList)
 
 	var awg sync.WaitGroup
-
-	var enabledAddons []string
 
 	defer func() { // making it show after verifications (see #7613)
 		register.Reg.SetStep(register.EnablingAddons)
@@ -466,12 +541,122 @@ func Start(wg *sync.WaitGroup, cc *config.ClusterConfig, toEnable map[string]boo
 		}(a)
 	}
 
-	// Wait until all of the addons are enabled before updating the config (not thread safe)
+	// Wait until all of the addons are enabled
 	awg.Wait()
 
-	for _, a := range enabledAddons {
+	// send the slice of all successfully enabled addons to channel and close
+	enabled <- enabledAddons
+	close(enabled)
+}
+
+// ToEnable returns the final list of addons to enable (not thread-safe).
+func ToEnable(cc *config.ClusterConfig, existing map[string]bool, additional []string) map[string]bool {
+	// start from existing
+	enable := map[string]bool{}
+	for k, v := range existing {
+		enable[k] = v
+	}
+
+	// Get the default values of any addons not saved to our config
+	for name, a := range assets.Addons {
+		if _, exists := existing[name]; !exists {
+			enable[name] = a.IsEnabledOrDefault(cc)
+		}
+	}
+
+	// Apply new addons
+	for _, name := range additional {
+		isDeprecated, replacement, msg := Deprecations(name)
+		if isDeprecated && replacement == "" {
+			out.FailureT(msg)
+			continue
+		} else if isDeprecated {
+			out.Styled(style.Waiting, msg)
+			name = replacement
+		}
+		// if the specified addon doesn't exist, skip enabling
+		if _, e := isAddonValid(name); e {
+			enable[name] = true
+		}
+	}
+
+	return enable
+}
+
+// UpdateConfigToEnable tries to update config with all enabled addons (not thread-safe).
+// Any error will be logged and it will continue.
+func UpdateConfigToEnable(cc *config.ClusterConfig, enabled []string) {
+	for _, a := range enabled {
 		if err := Set(cc, a, "true"); err != nil {
 			klog.Errorf("store failed: %v", err)
 		}
 	}
+}
+
+func UpdateConfigToDisable(cc *config.ClusterConfig) {
+	for name := range assets.Addons {
+		if err := Set(cc, name, "false"); err != nil {
+			klog.Errorf("store failed: %v", err)
+		}
+	}
+}
+
+// VerifyNotPaused verifies the cluster is not paused before enable/disable an addon.
+func VerifyNotPaused(profile string, enable bool) error {
+	klog.Info("checking whether the cluster is paused")
+
+	cc, err := config.Load(profile)
+	if err != nil {
+		return errors.Wrap(err, "loading profile")
+	}
+
+	api, err := machine.NewAPIClient()
+	if err != nil {
+		return errors.Wrap(err, "machine client")
+	}
+	defer api.Close()
+
+	cp, err := config.ControlPlane(*cc)
+	if err != nil {
+		return errors.Wrap(err, "get control-plane node")
+	}
+
+	host, err := machine.LoadHost(api, config.MachineName(*cc, cp))
+	if err != nil {
+		return errors.Wrap(err, "get host")
+	}
+
+	s, err := host.Driver.GetState()
+	if err != nil {
+		return errors.Wrap(err, "get state")
+	}
+	if s != state.Running {
+		// can't check the status of pods on a non-running cluster
+		return nil
+	}
+
+	runner, err := machine.CommandRunner(host)
+	if err != nil {
+		return errors.Wrap(err, "command runner")
+	}
+
+	crName := cc.KubernetesConfig.ContainerRuntime
+	cr, err := cruntime.New(cruntime.Config{Type: crName, Runner: runner})
+	if err != nil {
+		return errors.Wrap(err, "container runtime")
+	}
+	runtimePaused, err := cluster.CheckIfPaused(cr, []string{"kube-system"})
+	if err != nil {
+		return errors.Wrap(err, "check paused")
+	}
+	if !runtimePaused {
+		return nil
+	}
+	action := "disable"
+	if enable {
+		action = "enable"
+	}
+	msg := fmt.Sprintf("Can't %s addon on a paused cluster, please unpause the cluster first.", action)
+	out.Styled(style.Shrug, msg)
+	return errors.New(msg)
 }

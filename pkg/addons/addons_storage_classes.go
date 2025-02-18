@@ -39,6 +39,8 @@ func enableOrDisableStorageClasses(cc *config.ClusterConfig, name string, val st
 	class := defaultStorageClassProvisioner
 	if name == "storage-provisioner-gluster" {
 		class = "glusterfile"
+	} else if name == "storage-provisioner-rancher" {
+		class = "local-path"
 	}
 
 	api, err := machine.NewAPIClient()
@@ -47,12 +49,13 @@ func enableOrDisableStorageClasses(cc *config.ClusterConfig, name string, val st
 	}
 	defer api.Close()
 
-	cp, err := config.PrimaryControlPlane(cc)
-	if err != nil {
-		return errors.Wrap(err, "getting control plane")
+	pcp, err := config.ControlPlane(*cc)
+	if err != nil || !config.IsPrimaryControlPlane(*cc, pcp) {
+		return errors.Wrap(err, "get primary control-plane node")
 	}
-	if !machine.IsRunning(api, config.MachineName(*cc, cp)) {
-		klog.Warningf("%q is not running, writing %s=%v to disk and skipping enablement", config.MachineName(*cc, cp), name, val)
+	machineName := config.MachineName(*cc, pcp)
+	if !machine.IsRunning(api, machineName) {
+		klog.Warningf("%q is not running, writing %s=%v to disk and skipping enablement", machineName, name, val)
 		return EnableOrDisableAddon(cc, name, val)
 	}
 
@@ -62,6 +65,10 @@ func enableOrDisableStorageClasses(cc *config.ClusterConfig, name string, val st
 	}
 
 	if enable {
+		// Enable addon before marking it as default
+		if err = EnableOrDisableAddon(cc, name, val); err != nil {
+			return err
+		}
 		// Only StorageClass for 'name' should be marked as default
 		err = storageclass.SetDefaultStorageClass(storagev1, class)
 		if err != nil {
@@ -73,7 +80,10 @@ func enableOrDisableStorageClasses(cc *config.ClusterConfig, name string, val st
 		if err != nil {
 			return errors.Wrapf(err, "Error disabling %s as the default storage class", class)
 		}
+		if err = EnableOrDisableAddon(cc, name, val); err != nil {
+			return err
+		}
 	}
 
-	return EnableOrDisableAddon(cc, name, val)
+	return nil
 }

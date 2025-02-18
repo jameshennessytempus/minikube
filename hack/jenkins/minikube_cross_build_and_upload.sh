@@ -28,9 +28,10 @@ readonly bucket="minikube-builds"
 # Make sure the right golang version is installed based on Makefile
 ./hack/jenkins/installers/check_install_golang.sh /usr/local
 
+sudo apt-get -y install fakeroot
 
 declare -rx BUILD_IN_DOCKER=y
-declare -rx GOPATH=/var/lib/jenkins/go
+declare -rx GOPATH="$HOME/go"
 declare -rx ISO_BUCKET="${bucket}/${ghprbPullId}"
 declare -rx ISO_VERSION="testing"
 declare -rx TAG="${ghprbActualCommit}"
@@ -39,6 +40,7 @@ declare -rx DEB_VER="$(make deb_version)"
 
 docker kill $(docker ps -q) || true
 docker rm $(docker ps -aq) || true
+docker system prune -a --volumes -f
 make -j 16 \
   all \
   minikube-darwin-arm64 \
@@ -47,7 +49,6 @@ make -j 16 \
   out/minikube_${DEB_VER}_arm64.deb \
   out/docker-machine-driver-kvm2_$(make deb_version_base).deb \
   out/docker-machine-driver-kvm2_${DEB_VER}_amd64.deb \
-  out/docker-machine-driver-kvm2_${DEB_VER}_arm64.deb \
 && failed=$? || failed=$?
 
 BUILT_VERSION=$("out/minikube-$(go env GOOS)-$(go env GOARCH)" version)

@@ -18,11 +18,12 @@ package drivers
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
 
@@ -40,8 +41,6 @@ import (
 // LeasesPath is the path to dhcpd leases
 const LeasesPath = "/var/db/dhcpd_leases"
 
-var leadingZeroRegexp = regexp.MustCompile(`0([A-Fa-f0-9](:|$))`)
-
 // This file is for common code shared among internal machine drivers
 // Code here should not be called from within minikube
 
@@ -56,6 +55,35 @@ func ExtraDiskPath(d *drivers.BaseDriver, diskID int) string {
 	return filepath.Join(d.ResolveStorePath("."), file)
 }
 
+// CreateRawDisk creates a new raw disk image.
+//
+// Example usage:
+//
+//	path := ExtraDiskPath(baseDriver, diskID)
+//	err := CreateRawDisk(path, baseDriver.DiskSize)
+func CreateRawDisk(diskPath string, sizeMB int) error {
+	log.Infof("Creating raw disk image: %s of size %vMB", diskPath, sizeMB)
+
+	_, err := os.Stat(diskPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			// un-handle-able error stat-ing the disk file
+			return errors.Wrap(err, "stat")
+		}
+		// disk file does not exist; create it
+		file, err := os.OpenFile(diskPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+		if err != nil {
+			return errors.Wrap(err, "open")
+		}
+		defer file.Close()
+
+		if err := file.Truncate(util.ConvertMBToBytes(sizeMB)); err != nil {
+			return errors.Wrap(err, "truncate")
+		}
+	}
+	return nil
+}
+
 // CommonDriver is the common driver base class
 type CommonDriver struct{}
 
@@ -65,7 +93,7 @@ func (d *CommonDriver) GetCreateFlags() []mcnflag.Flag {
 }
 
 // SetConfigFromFlags is not implemented yet
-func (d *CommonDriver) SetConfigFromFlags(flags drivers.DriverOptions) error {
+func (d *CommonDriver) SetConfigFromFlags(_ drivers.DriverOptions) error {
 	return nil
 }
 
@@ -161,7 +189,7 @@ func fixMachinePermissions(path string) error {
 type DHCPEntry struct {
 	Name      string
 	IPAddress string
-	HWAddress string
+	HWAddress net.HardwareAddr
 	ID        string
 	Lease     string
 }
@@ -172,6 +200,13 @@ func GetIPAddressByMACAddress(mac string) (string, error) {
 }
 
 func getIPAddressFromFile(mac, path string) (string, error) {
+	// Due to https://openradar.appspot.com/FB15382970 we need to parse the MAC
+	// address and compare the bytes.
+	macAddress, err := parseMAC(mac)
+	if err != nil {
+		return "", err
+	}
+
 	log.Debugf("Searching for %s in %s ...", mac, path)
 	file, err := os.Open(path)
 	if err != nil {
@@ -186,7 +221,10 @@ func getIPAddressFromFile(mac, path string) (string, error) {
 	log.Debugf("Found %d entries in %s!", len(dhcpEntries), path)
 	for _, dhcpEntry := range dhcpEntries {
 		log.Debugf("dhcp entry: %+v", dhcpEntry)
-		if dhcpEntry.HWAddress == mac {
+		if dhcpEntry.HWAddress == nil {
+			continue
+		}
+		if bytes.Equal(dhcpEntry.HWAddress, macAddress) {
 			log.Debugf("Found match: %s", mac)
 			return dhcpEntry.IPAddress, nil
 		}
@@ -223,7 +261,13 @@ func parseDHCPdLeasesFile(file io.Reader) ([]DHCPEntry, error) {
 			dhcpEntry.IPAddress = val
 		case "hw_address":
 			// The mac addresses have a '1,' at the start.
-			dhcpEntry.HWAddress = val[2:]
+			macAddress, err := parseMAC(val[2:])
+			if err != nil {
+				log.Warnf("unable to parse hw_address in dhcp leases file: %q: %s",
+					val[2:], err)
+				continue
+			}
+			dhcpEntry.HWAddress = macAddress
 		case "identifier":
 			dhcpEntry.ID = val
 		case "lease":
@@ -235,7 +279,17 @@ func parseDHCPdLeasesFile(file io.Reader) ([]DHCPEntry, error) {
 	return dhcpEntries, scanner.Err()
 }
 
-// TrimMacAddress trimming "0" of the ten's digit
-func TrimMacAddress(rawUUID string) string {
-	return leadingZeroRegexp.ReplaceAllString(rawUUID, "$1")
+// parseMAC parse both standard fixeed size MAC address "%02x:..." and the
+// variable size MAC address on drawin "%x:...".
+func parseMAC(mac string) (net.HardwareAddr, error) {
+	hw := make(net.HardwareAddr, 6)
+	n, err := fmt.Sscanf(mac, "%x:%x:%x:%x:%x:%x",
+		&hw[0], &hw[1], &hw[2], &hw[3], &hw[4], &hw[5])
+	if n != len(hw) {
+		return nil, fmt.Errorf("invalid MAC address: %q", mac)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse MAC address: %q: %s", mac, err)
+	}
+	return hw, nil
 }

@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"net"
 	"text/template"
 	"time"
 
@@ -33,7 +34,7 @@ import (
 )
 
 // Replace with hardcoded range with CIDR
-// https://play.golang.org/p/m8TNTtygK0
+// https://go.dev/play/p/m8TNTtygK0
 const networkTmpl = `
 <network>
   <name>{{.Name}}</name>
@@ -117,7 +118,11 @@ func (d *Driver) ensureNetwork() error {
 	if err != nil {
 		return errors.Wrap(err, "getting libvirt connection")
 	}
-	defer conn.Close()
+	defer func() {
+		if _, err := conn.Close(); err != nil {
+			log.Errorf("unable to close libvirt connection: %v", err)
+		}
+	}()
 
 	// network: default
 
@@ -161,7 +166,11 @@ func (d *Driver) createNetwork() error {
 	if err != nil {
 		return errors.Wrap(err, "getting libvirt connection")
 	}
-	defer conn.Close()
+	defer func() {
+		if _, err := conn.Close(); err != nil {
+			log.Errorf("unable to close libvirt connection: %v", err)
+		}
+	}()
 
 	// network: default
 	// It is assumed that the libvirt/kvm installation has already created this network
@@ -197,6 +206,12 @@ func (d *Driver) createNetwork() error {
 			log.Debugf("failed to find free subnet for private KVM network %s after %d attempts: %v", d.PrivateNetwork, 20, err)
 			return fmt.Errorf("un-retryable: %w", err)
 		}
+
+		// reserve last client ip address for multi-control-plane loadbalancer vip address in ha cluster
+		clientMaxIP := net.ParseIP(subnet.ClientMax)
+		clientMaxIP.To4()[3]--
+		subnet.ClientMax = clientMaxIP.String()
+
 		// create the XML for the private network from our networkTmpl
 		tryNet := kvmNetwork{
 			Name:       d.PrivateNetwork,
@@ -207,12 +222,15 @@ func (d *Driver) createNetwork() error {
 		if err = tmpl.Execute(&networkXML, tryNet); err != nil {
 			return fmt.Errorf("executing private KVM network template: %w", err)
 		}
+		log.Debugf("created network xml: %s", networkXML.String())
+
 		// define the network using our template
 		var network *libvirt.Network
 		network, err = conn.NetworkDefineXML(networkXML.String())
 		if err != nil {
 			return fmt.Errorf("defining private KVM network %s %s from xml %s: %w", d.PrivateNetwork, subnet.CIDR, networkXML.String(), err)
 		}
+
 		// and finally create & start it
 		log.Debugf("trying to create private KVM network %s %s...", d.PrivateNetwork, subnet.CIDR)
 		if err = network.Create(); err == nil {
@@ -230,10 +248,18 @@ func (d *Driver) deleteNetwork() error {
 	if err != nil {
 		return errors.Wrap(err, "getting libvirt connection")
 	}
-	defer conn.Close()
+	defer func() {
+		if _, err := conn.Close(); err != nil {
+			log.Errorf("unable to close libvirt connection: %v", err)
+		}
+	}()
 
 	// network: default
 	// It is assumed that the OS manages this network
+	if d.PrivateNetwork == defaultNetworkName {
+		log.Debugf("Using the default network, skipping deletion")
+		return nil
+	}
 
 	// network: private
 	log.Debugf("Checking if network %s exists...", d.PrivateNetwork)
@@ -256,7 +282,7 @@ func (d *Driver) deleteNetwork() error {
 	// when we reach this point, it means it is safe to delete the network
 
 	log.Debugf("Trying to delete network %s...", d.PrivateNetwork)
-	delete := func() error {
+	deleteFunc := func() error {
 		active, err := network.IsActive()
 		if err != nil {
 			return err
@@ -270,7 +296,7 @@ func (d *Driver) deleteNetwork() error {
 		log.Debugf("Undefining inactive network %s", d.PrivateNetwork)
 		return network.Undefine()
 	}
-	if err := retry.Local(delete, 10*time.Second); err != nil {
+	if err := retry.Local(deleteFunc, 10*time.Second); err != nil {
 		return errors.Wrap(err, "deleting network")
 	}
 	log.Debugf("Network %s deleted", d.PrivateNetwork)

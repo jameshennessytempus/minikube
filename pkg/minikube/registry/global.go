@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"time"
 
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/pkg/minikube/translate"
@@ -111,11 +112,24 @@ func Available(vm bool) []DriverState {
 	klog.Infof("Querying for installed drivers using PATH=%s", os.Getenv("PATH"))
 
 	for _, d := range globalRegistry.List() {
+		if vm && !IsVM(d.Name) {
+			continue
+		}
 		if d.Status == nil {
 			klog.Errorf("%q does not implement Status", d.Name)
 			continue
 		}
-		s := d.Status()
+		stateChannel := make(chan State)
+		timeoutChannel := time.After(20 * time.Second)
+		go func() {
+			stateChannel <- d.Status()
+		}()
+		s := State{}
+		select {
+		case <-timeoutChannel:
+			klog.Infof("%s status check timeout!", d.Name)
+		case s = <-stateChannel:
+		}
 		klog.Infof("%s default: %v priority: %d, state: %+v", d.Name, d.Default, d.Priority, s)
 
 		preference := d.Priority
@@ -123,14 +137,7 @@ func Available(vm bool) []DriverState {
 		if !s.Healthy {
 			priority = Unhealthy
 		}
-
-		if vm {
-			if IsVM(d.Name) {
-				sts = append(sts, DriverState{Name: d.Name, Default: d.Default, Preference: preference, Priority: priority, State: s})
-			}
-		} else {
-			sts = append(sts, DriverState{Name: d.Name, Default: d.Default, Preference: preference, Priority: priority, State: s})
-		}
+		sts = append(sts, DriverState{Name: d.Name, Default: d.Default, Preference: preference, Priority: priority, State: s})
 	}
 
 	// Descending priority for predictability

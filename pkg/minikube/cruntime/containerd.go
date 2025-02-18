@@ -37,9 +37,11 @@ import (
 	"k8s.io/minikube/pkg/minikube/cni"
 	"k8s.io/minikube/pkg/minikube/command"
 	"k8s.io/minikube/pkg/minikube/config"
+	"k8s.io/minikube/pkg/minikube/constants"
 	"k8s.io/minikube/pkg/minikube/download"
 	"k8s.io/minikube/pkg/minikube/style"
 	"k8s.io/minikube/pkg/minikube/sysinit"
+	"k8s.io/minikube/pkg/util/retry"
 )
 
 const (
@@ -123,23 +125,71 @@ func (r *Containerd) Available() error {
 	if _, err := r.Runner.RunCmd(c); err != nil {
 		return errors.Wrap(err, "check containerd availability")
 	}
-	return nil
+	return checkCNIPlugins(r.KubernetesVersion)
 }
 
 // generateContainerdConfig sets up /etc/containerd/config.toml & /etc/containerd/containerd.conf.d/02-containerd.conf
-func generateContainerdConfig(cr CommandRunner, imageRepository string, kv semver.Version, forceSystemd bool, insecureRegistry []string, inUserNamespace bool) error {
+func generateContainerdConfig(cr CommandRunner, imageRepository string, kv semver.Version, cgroupDriver string, insecureRegistry []string, inUserNamespace bool) error {
 	pauseImage := images.Pause(kv, imageRepository)
-	if _, err := cr.RunCmd(exec.Command("/bin/bash", "-c", fmt.Sprintf("sudo sed -e 's|^.*sandbox_image = .*$|sandbox_image = \"%s\"|' -i %s", pauseImage, containerdConfigFile))); err != nil {
+	if _, err := cr.RunCmd(exec.Command("sh", "-c", fmt.Sprintf(`sudo sed -i -r 's|^( *)sandbox_image = .*$|\1sandbox_image = %q|' %s`, pauseImage, containerdConfigFile))); err != nil {
 		return errors.Wrap(err, "update sandbox_image")
 	}
-	if _, err := cr.RunCmd(exec.Command("/bin/bash", "-c", fmt.Sprintf("sudo sed -e 's|^.*restrict_oom_score_adj = .*$|restrict_oom_score_adj = %t|' -i %s", inUserNamespace, containerdConfigFile))); err != nil {
+	if _, err := cr.RunCmd(exec.Command("sh", "-c", fmt.Sprintf(`sudo sed -i -r 's|^( *)restrict_oom_score_adj = .*$|\1restrict_oom_score_adj = %t|' %s`, inUserNamespace, containerdConfigFile))); err != nil {
 		return errors.Wrap(err, "update restrict_oom_score_adj")
 	}
-	if _, err := cr.RunCmd(exec.Command("/bin/bash", "-c", fmt.Sprintf("sudo sed -e 's|^.*SystemdCgroup = .*$|SystemdCgroup = %t|' -i %s", forceSystemd, containerdConfigFile))); err != nil {
-		return errors.Wrap(err, "update SystemdCgroup")
+
+	// configure cgroup driver
+	if cgroupDriver == constants.UnknownCgroupDriver {
+		klog.Warningf("unable to configure containerd to use unknown cgroup driver, will use default %q instead", constants.DefaultCgroupDriver)
+		cgroupDriver = constants.DefaultCgroupDriver
 	}
-	if _, err := cr.RunCmd(exec.Command("/bin/bash", "-c", fmt.Sprintf("sudo sed -e 's|^.*conf_dir = .*$|conf_dir = \"%s\"|' -i %s", cni.ConfDir, containerdConfigFile))); err != nil {
+	klog.Infof("configuring containerd to use %q as cgroup driver...", cgroupDriver)
+	useSystemd := cgroupDriver == constants.SystemdCgroupDriver
+	if _, err := cr.RunCmd(exec.Command("sh", "-c", fmt.Sprintf(`sudo sed -i -r 's|^( *)SystemdCgroup = .*$|\1SystemdCgroup = %t|g' %s`, useSystemd, containerdConfigFile))); err != nil {
+		return errors.Wrap(err, "configuring SystemdCgroup")
+	}
+
+	// handle deprecated/removed features
+	// ref: https://github.com/containerd/containerd/blob/main/RELEASES.md#deprecated-features
+	if _, err := cr.RunCmd(exec.Command("sh", "-c", fmt.Sprintf(`sudo sed -i 's|"io.containerd.runtime.v1.linux"|"io.containerd.runc.v2"|g' %s`, containerdConfigFile))); err != nil {
+		return errors.Wrap(err, "configuring io.containerd.runtime version")
+	}
+
+	// avoid containerd v1.6.14+ "failed to load plugin io.containerd.grpc.v1.cri" error="invalid plugin config: `systemd_cgroup` only works for runtime io.containerd.runtime.v1.linux" error
+	// that then leads to crictl "getting the runtime version: rpc error: code = Unimplemented desc = unknown service runtime.v1alpha2.RuntimeService" error
+	// ref: https://github.com/containerd/containerd/issues/4203
+	if _, err := cr.RunCmd(exec.Command("sh", "-c", fmt.Sprintf(`sudo sed -i '/systemd_cgroup/d' %s`, containerdConfigFile))); err != nil {
+		return errors.Wrap(err, "removing deprecated systemd_cgroup param")
+	}
+
+	// "runtime_type" has to be specified and it should be "io.containerd.runc.v2"
+	// ref: https://github.com/containerd/containerd/issues/6964#issuecomment-1132378279
+	if _, err := cr.RunCmd(exec.Command("sh", "-c", fmt.Sprintf(`sudo sed -i 's|"io.containerd.runc.v1"|"io.containerd.runc.v2"|g' %s`, containerdConfigFile))); err != nil {
+		return errors.Wrap(err, "configuring io.containerd.runc version")
+	}
+
+	// ensure conf_dir is using '/etc/cni/net.d'
+	// we might still want to try removing '/etc/cni/net.mk' in case of upgrade from previous minikube version that had/used it
+	if _, err := cr.RunCmd(exec.Command("sh", "-c", `sudo rm -rf /etc/cni/net.mk`)); err != nil {
+		klog.Warningf("unable to remove /etc/cni/net.mk directory: %v", err)
+	}
+	if _, err := cr.RunCmd(exec.Command("sh", "-c", fmt.Sprintf(`sudo sed -i -r 's|^( *)conf_dir = .*$|\1conf_dir = %q|g' %s`, cni.DefaultConfDir, containerdConfigFile))); err != nil {
 		return errors.Wrap(err, "update conf_dir")
+	}
+
+	// enable 'enable_unprivileged_ports' so that containers that run with non-root user can bind to otherwise privilege ports (like coredns v1.11.0+)
+	// note: 'net.ipv4.ip_unprivileged_port_start' sysctl was marked as safe since kubernetes v1.22 (Aug 4, 2021) (ref: https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.22.md#feature-9)
+	// note: containerd supports 'enable_unprivileged_ports' option since v1.6.0-beta.3 (Nov 19, 2021) (ref: https://github.com/containerd/containerd/releases/tag/v1.6.0-beta.3; https://github.com/containerd/containerd/pull/6170)
+	// note: minikube bumped containerd version to greater than v1.6.0 on May 19, 2022 (ref: https://github.com/kubernetes/minikube/pull/14152)
+	if kv.GTE(semver.Version{Major: 1, Minor: 22}) {
+		// remove any existing 'enable_unprivileged_ports' settings
+		if _, err := cr.RunCmd(exec.Command("sh", "-c", fmt.Sprintf(`sudo sed -i '/^ *enable_unprivileged_ports = .*/d' %s`, containerdConfigFile))); err != nil {
+			return errors.Wrap(err, "removing enable_unprivileged_ports")
+		}
+		// add 'enable_unprivileged_ports' with value 'true'
+		if _, err := cr.RunCmd(exec.Command("sh", "-c", fmt.Sprintf(`sudo sed -i -r 's|^( *)\[plugins."io.containerd.grpc.v1.cri"\]|&\n\1  enable_unprivileged_ports = true|' %s`, containerdConfigFile))); err != nil {
+			return errors.Wrap(err, "configuring enable_unprivileged_ports")
+		}
 	}
 
 	for _, registry := range insecureRegistry {
@@ -175,7 +225,8 @@ func generateContainerdConfig(cr CommandRunner, imageRepository string, kv semve
 }
 
 // Enable idempotently enables containerd on a host
-func (r *Containerd) Enable(disOthers, forceSystemd, inUserNamespace bool) error {
+// It is also called by docker.Enable() - if bound to containerd, to enforce proper containerd configuration completed by service restart.
+func (r *Containerd) Enable(disOthers bool, cgroupDriver string, inUserNamespace bool) error {
 	if inUserNamespace {
 		if err := CheckKernelCompatibility(r.Runner, 5, 11); err != nil {
 			// For using overlayfs
@@ -194,7 +245,8 @@ func (r *Containerd) Enable(disOthers, forceSystemd, inUserNamespace bool) error
 	if err := populateCRIConfig(r.Runner, r.SocketPath()); err != nil {
 		return err
 	}
-	if err := generateContainerdConfig(r.Runner, r.ImageRepository, r.KubernetesVersion, forceSystemd, r.InsecureRegistry, inUserNamespace); err != nil {
+
+	if err := generateContainerdConfig(r.Runner, r.ImageRepository, r.KubernetesVersion, cgroupDriver, r.InsecureRegistry, inUserNamespace); err != nil {
 		return err
 	}
 	if err := enableIPForwarding(r.Runner); err != nil {
@@ -212,12 +264,12 @@ func (r *Containerd) Disable() error {
 
 // ImageExists checks if image exists based on image name and optionally image sha
 func (r *Containerd) ImageExists(name string, sha string) bool {
-	c := exec.Command("/bin/bash", "-c", fmt.Sprintf("sudo ctr -n=k8s.io images check | grep %s", name))
-	rr, err := r.Runner.RunCmd(c)
-	if err != nil {
-		return false
-	}
-	if sha != "" && !strings.Contains(rr.Output(), sha) {
+	klog.Infof("Checking existence of image with name %q and sha %q", name, sha)
+	c := exec.Command("sudo", "ctr", "-n=k8s.io", "images", "ls", fmt.Sprintf("name==%s", name))
+	// note: image name and image id's sha can be on different lines in ctr output
+	if rr, err := r.Runner.RunCmd(c); err != nil ||
+		!strings.Contains(rr.Output(), name) ||
+		(sha != "" && !strings.Contains(rr.Output(), sha)) {
 		return false
 	}
 	return true
@@ -373,7 +425,7 @@ func (r *Containerd) BuildImage(src string, file string, tag string, push bool, 
 
 // PushImage pushes an image
 func (r *Containerd) PushImage(name string) error {
-	klog.Infof("Pushing image %s: %s", name)
+	klog.Infof("Pushing image %s", name)
 	c := exec.Command("sudo", "ctr", "-n=k8s.io", "images", "push", name)
 	if _, err := r.Runner.RunCmd(c); err != nil {
 		return errors.Wrapf(err, "ctr images push")
@@ -387,31 +439,46 @@ func (r *Containerd) CGroupDriver() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if info["config"] == nil {
-		return "", errors.Wrapf(err, "missing config")
+
+	// crictl also returns default ('false') value for "systemdCgroup" - deprecated "systemd_cgroup" config param that is now irrelevant
+	// ref: https://github.com/containerd/containerd/blob/5e7baa2eb3dab4c4365dd63c05ed8b3fa94b9271/pkg/cri/config/config.go#L277-L280
+	// ref: https://github.com/containerd/containerd/issues/4574#issuecomment-1298727099
+	// so, we try to extract runc's "SystemdCgroup" option that we care about
+	// ref: https://github.com/containerd/containerd/issues/4203#issuecomment-651532765
+	j, err := json.Marshal(info)
+	if err != nil {
+		return "", fmt.Errorf("marshalling: %v", err)
 	}
-	config, ok := info["config"].(map[string]interface{})
-	if !ok {
-		return "", errors.Wrapf(err, "config not map")
+	s := struct {
+		Config struct {
+			Containerd struct {
+				Runtimes struct {
+					Runc struct {
+						Options struct {
+							SystemdCgroup bool `json:"SystemdCgroup"`
+						} `json:"options"`
+					} `json:"runc"`
+				} `json:"runtimes"`
+			} `json:"containerd"`
+		} `json:"config"`
+	}{}
+	if err := json.Unmarshal(j, &s); err != nil {
+		return "", fmt.Errorf("unmarshalling: %v", err)
 	}
-	cgroupManager := "cgroupfs" // default
-	switch config["systemdCgroup"] {
-	case false:
-		cgroupManager = "cgroupfs"
+	// note: if "path" does not exists, SystemdCgroup will evaluate to false as 'default' value for bool => constants.CgroupfsCgroupDriver
+	switch s.Config.Containerd.Runtimes.Runc.Options.SystemdCgroup {
 	case true:
-		cgroupManager = "systemd"
+		return constants.SystemdCgroupDriver, nil
+	case false:
+		return constants.CgroupfsCgroupDriver, nil
+	default:
+		return constants.DefaultCgroupDriver, nil
 	}
-	return cgroupManager, nil
 }
 
 // KubeletOptions returns kubelet options for a containerd
 func (r *Containerd) KubeletOptions() map[string]string {
-	return map[string]string{
-		"container-runtime":          "remote",
-		"container-runtime-endpoint": fmt.Sprintf("unix://%s", r.SocketPath()),
-		"image-service-endpoint":     fmt.Sprintf("unix://%s", r.SocketPath()),
-		"runtime-request-timeout":    "15m",
-	}
+	return kubeletCRIOptions(r, r.KubernetesVersion)
 }
 
 // ListContainers returns a list of managed by this container runtime
@@ -440,13 +507,13 @@ func (r *Containerd) StopContainers(ids []string) error {
 }
 
 // ContainerLogCmd returns the command to retrieve the log for a container based on ID
-func (r *Containerd) ContainerLogCmd(id string, len int, follow bool) string {
-	return criContainerLogCmd(r.Runner, id, len, follow)
+func (r *Containerd) ContainerLogCmd(id string, length int, follow bool) string {
+	return criContainerLogCmd(r.Runner, id, length, follow)
 }
 
 // SystemLogCmd returns the command to retrieve system logs
-func (r *Containerd) SystemLogCmd(len int) string {
-	return fmt.Sprintf("sudo journalctl -u containerd -n %d", len)
+func (r *Containerd) SystemLogCmd(length int) string {
+	return fmt.Sprintf("sudo journalctl -u containerd -n %d", length)
 }
 
 // Preload preloads the container runtime with k8s images
@@ -493,14 +560,14 @@ func (r *Containerd) Preload(cc config.ClusterConfig) error {
 	if err := r.Runner.Copy(fa); err != nil {
 		return errors.Wrap(err, "copying file")
 	}
-	klog.Infof("Took %f seconds to copy over tarball", time.Since(t).Seconds())
+	klog.Infof("duration metric: took %s to copy over tarball", time.Since(t))
 
 	t = time.Now()
 	// extract the tarball to /var in the VM
-	if rr, err := r.Runner.RunCmd(exec.Command("sudo", "tar", "-I", "lz4", "-C", "/var", "-xf", dest)); err != nil {
+	if rr, err := r.Runner.RunCmd(exec.Command("sudo", "tar", "--xattrs", "--xattrs-include", "security.capability", "-I", "lz4", "-C", "/var", "-xf", dest)); err != nil {
 		return errors.Wrapf(err, "extracting tarball: %s", rr.Output())
 	}
-	klog.Infof("Took %f seconds t extract the tarball", time.Since(t).Seconds())
+	klog.Infof("duration metric: took %s to extract the tarball", time.Since(t))
 
 	//  remove the tarball in the VM
 	if err := r.Runner.Remove(fa); err != nil {
@@ -510,20 +577,27 @@ func (r *Containerd) Preload(cc config.ClusterConfig) error {
 	return r.Restart()
 }
 
-// Restart restarts Docker on a host
+// Restart restarts this container runtime on a host
 func (r *Containerd) Restart() error {
 	return r.Init.Restart("containerd")
 }
 
 // containerdImagesPreloaded returns true if all images have been preloaded
 func containerdImagesPreloaded(runner command.Runner, images []string) bool {
-	rr, err := runner.RunCmd(exec.Command("sudo", "crictl", "images", "--output", "json"))
-	if err != nil {
+	var rr *command.RunResult
+
+	imageList := func() (err error) {
+		rr, err = runner.RunCmd(exec.Command("sudo", "crictl", "images", "--output", "json"))
+		return err
+	}
+
+	if err := retry.Expo(imageList, 250*time.Millisecond, 5*time.Second); err != nil {
+		klog.Warningf("failed to get image list: %v", err)
 		return false
 	}
 
 	var jsonImages crictlImages
-	err = json.Unmarshal(rr.Stdout.Bytes(), &jsonImages)
+	err := json.Unmarshal(rr.Stdout.Bytes(), &jsonImages)
 	if err != nil {
 		klog.Errorf("failed to unmarshal images, will assume images are not preloaded")
 		return false

@@ -31,7 +31,7 @@ oom_score = 0
     stream_server_address = ""
     stream_server_port = "10010"
     enable_selinux = false
-    sandbox_image = "k8s.gcr.io/pause:3.6"
+    sandbox_image = "registry.k8s.io/pause:3.6"
     stats_collect_period = 10
     enable_tls_streaming = false
     max_container_log_line_size = 16384
@@ -40,8 +40,7 @@ oom_score = 0
     [plugins."io.containerd.grpc.v1.cri".containerd]
       discard_unpacked_layers = true
       snapshotter = "overlayfs"
-      [plugins."io.containerd.grpc.v1.cri".containerd.default_runtime]
-        runtime_type = "io.containerd.runc.v2"
+      default_runtime_name = "runc"
       [plugins."io.containerd.grpc.v1.cri".containerd.untrusted_workload_runtime]
         runtime_type = ""
         runtime_engine = ""
@@ -54,11 +53,11 @@ oom_score = 0
 
     [plugins."io.containerd.grpc.v1.cri".cni]
       bin_dir = "/opt/cni/bin"
-      conf_dir = "/etc/cni/net.mk"
+      conf_dir = "/etc/cni/net.d"
       conf_template = ""
     [plugins."io.containerd.grpc.v1.cri".registry]
       config_path = "/etc/containerd/certs.d"
-      
+
   [plugins."io.containerd.service.v1.diff-service"]
     default = ["walking"]
   [plugins."io.containerd.gc.v1.scheduler"]

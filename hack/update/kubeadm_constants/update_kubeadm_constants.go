@@ -19,17 +19,17 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"text/template"
 	"time"
 
+	"github.com/google/go-github/v69/github"
 	"golang.org/x/mod/semver"
 	"k8s.io/klog/v2"
 	"k8s.io/minikube/hack/update"
@@ -39,8 +39,8 @@ import (
 const (
 	// default context timeout
 	cxTimeout                 = 5 * time.Minute
-	kubeadmReleaseURL         = "https://storage.googleapis.com/kubernetes-release/release/%s/bin/linux/amd64/kubeadm"
-	kubeadmBinaryName         = "kubeadm-linux-amd64-%s"
+	kubeadmReleaseURL         = "https://dl.k8s.io/release/%s/bin/linux/%s/kubeadm"
+	kubeadmBinaryName         = "kubeadm-linux-%s-%s"
 	minikubeConstantsFilePath = "pkg/minikube/constants/constants_kubeadm_images.go"
 	kubeadmImagesTemplate     = `
 		{{- range $version, $element := .}}
@@ -57,28 +57,39 @@ type Data struct {
 }
 
 func main() {
+	minver := constants.OldestKubernetesVersion
 
-	inputVersion := flag.Lookup("kubernetes-version").Value.String()
+	releases := []string{}
 
-	imageVersions := make([]string, 0)
+	ghc := github.NewClient(nil)
 
-	// set a context with defined timeout
-	ctx, cancel := context.WithTimeout(context.Background(), cxTimeout)
-	defer cancel()
-	if inputVersion == "latest" {
-		stableImageVersion, latestImageVersion, edgeImageVersion, err := getK8sVersions(ctx, "kubernetes", "kubernetes")
+	opts := &github.ListOptions{PerPage: 100}
+	for {
+		rls, resp, err := ghc.Repositories.ListReleases(context.Background(), "kubernetes", "kubernetes", opts)
 		if err != nil {
 			klog.Fatal(err)
 		}
-		uniqueMM := filterLatestUniqueMM([]string{stableImageVersion, latestImageVersion, edgeImageVersion})
-		imageVersions = append(imageVersions, uniqueMM...)
-	} else if semver.IsValid(inputVersion) {
-		imageVersions = append(imageVersions, inputVersion)
-	} else {
-		klog.Fatal(errors.New("invalid version"))
+		for _, rl := range rls {
+			ver := rl.GetTagName()
+			if !semver.IsValid(ver) {
+				continue
+			}
+			// skip out-of-range versions
+			if minver != "" && semver.Compare(minver, ver) == 1 {
+				continue
+			}
+			releases = append([]string{ver}, releases...)
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
 	}
 
-	for _, imageVersion := range imageVersions {
+	for _, imageVersion := range releases {
+		if _, ok := constants.KubeadmImages[imageVersion]; ok {
+			continue
+		}
 		imageMapString, err := getKubeadmImagesMapString(imageVersion)
 		if err != nil {
 			klog.Fatalln(err)
@@ -91,44 +102,19 @@ func main() {
 			},
 		}
 
-		majorMinorVersion := semver.MajorMinor(imageVersion)
-
-		if _, ok := constants.KubeadmImages[majorMinorVersion]; !ok {
-			data = Data{ImageMap: imageMapString}
-			schema[minikubeConstantsFilePath].Replace[`KubeadmImages = .*`] =
-				`KubeadmImages = map[string]map[string]string{ {{.ImageMap}}`
-		} else {
-			data = Data{ImageMap: strings.TrimLeft(imageMapString, "\n")}
-			versionIdentifier := fmt.Sprintf(`"%s": {[^}]+},`, majorMinorVersion)
-			schema[minikubeConstantsFilePath].Replace[versionIdentifier] = "{{.ImageMap}}"
-		}
-
+		data = Data{ImageMap: imageMapString}
+		schema[minikubeConstantsFilePath].Replace[`KubeadmImages = .*`] =
+			`KubeadmImages = map[string]map[string]string{ {{.ImageMap}}`
 		update.Apply(schema, data)
 	}
 }
 
-func filterLatestUniqueMM(versions []string) []string {
-	if len(versions) < 2 {
-		return versions
-	}
-	semver.Sort(versions)
-	uniqueMMVersions := []string{}
-	last := versions[0]
-	for _, ver := range versions {
-		if semver.MajorMinor(last) != semver.MajorMinor(ver) {
-			uniqueMMVersions = append(uniqueMMVersions, last)
-		}
-		last = ver
-	}
-	uniqueMMVersions = append(uniqueMMVersions, last)
-	return uniqueMMVersions
-}
-
 func getKubeadmImagesMapString(version string) (string, error) {
-	url := fmt.Sprintf(kubeadmReleaseURL, version)
-	fileName := fmt.Sprintf(kubeadmBinaryName, version)
+	arch := runtime.GOARCH
+	url := fmt.Sprintf(kubeadmReleaseURL, version, arch)
+	fileName := fmt.Sprintf(kubeadmBinaryName, arch, version)
 	if err := downloadFile(url, fileName); err != nil {
-		klog.Errorf("failed to download kubeadm binary %s", err.Error())
+		klog.Errorf("failed to download kubeadm binary: %v", err)
 		return "", err
 	}
 
@@ -149,8 +135,7 @@ func getKubeadmImagesMapString(version string) (string, error) {
 
 func formatKubeadmImageList(version, data string) (string, error) {
 	templateData := make(map[string]map[string]string)
-	majorMinorVersion := semver.MajorMinor(version)
-	templateData[majorMinorVersion] = make(map[string]string)
+	templateData[version] = make(map[string]string)
 	lines := strings.Split(data, "\n")
 	for _, line := range lines {
 		imageTag := strings.Split(line, ":")
@@ -161,14 +146,14 @@ func formatKubeadmImageList(version, data string) (string, error) {
 		imageName := strings.Split(imageTag[0], "/")
 		imageTag[0] = strings.Join(imageName[1:], "/")
 		if !isKubeImage(imageTag[0]) {
-			templateData[majorMinorVersion][imageTag[0]] = imageTag[1]
+			templateData[version][imageTag[0]] = imageTag[1]
 		}
 	}
 
 	imageTemplate := template.New("kubeadmImage")
 	t, err := imageTemplate.Parse(kubeadmImagesTemplate)
 	if err != nil {
-		klog.Errorf("failed to create kubeadm image map template %s", err.Error())
+		klog.Errorf("failed to create kubeadm image map template: %v", err)
 		return "", err
 	}
 
@@ -220,19 +205,4 @@ func executeCommand(command string, args ...string) (string, error) {
 		return "", err
 	}
 	return string(output), nil
-}
-
-// getK8sVersion returns Kubernetes versions.
-func getK8sVersions(ctx context.Context, owner, repo string) (stable, latest, edge string, err error) {
-	// get Kubernetes versions from GitHub Releases
-	stable, latest, edge, err = update.GHReleases(ctx, owner, repo)
-	if err != nil {
-		return "", "", "", err
-	}
-
-	if !semver.IsValid(stable) || !semver.IsValid(latest) || !semver.IsValid(edge) {
-		return "", "", "", fmt.Errorf("invalid release obtained stable : %s, latest : %s, edge: %s", stable, latest, edge)
-	}
-
-	return stable, latest, edge, nil
 }

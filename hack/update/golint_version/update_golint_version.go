@@ -20,7 +20,6 @@ import (
 	"context"
 	"time"
 
-	"golang.org/x/mod/semver"
 	"k8s.io/klog/v2"
 
 	"k8s.io/minikube/hack/update"
@@ -41,7 +40,7 @@ var (
 	}
 )
 
-// Data holds stable gopogh version in semver format.
+// Data holds stable golint version in semver format.
 type Data struct {
 	StableVersion string
 }
@@ -52,7 +51,7 @@ func main() {
 	defer cancel()
 
 	// get Golint stable version
-	stable, err := golintVersion(ctx, "golangci", "golangci-lint")
+	stable, err := update.StableVersion(ctx, "golangci", "golangci-lint")
 	if err != nil {
 		klog.Fatalf("Unable to get Golint stable version: %v", err)
 	}
@@ -60,14 +59,4 @@ func main() {
 	klog.Infof("Golint stable version: %s", data.StableVersion)
 
 	update.Apply(schema, data)
-}
-
-// golintVersions returns stable version in semver format.
-func golintVersion(ctx context.Context, owner, repo string) (stable string, err error) {
-	// get Kubernetes versions from GitHub Releases
-	stable, _, _, err = update.GHReleases(ctx, owner, repo)
-	if err != nil || !semver.IsValid(stable) {
-		return "", err
-	}
-	return stable, nil
 }

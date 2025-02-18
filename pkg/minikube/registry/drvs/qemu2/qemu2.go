@@ -21,17 +21,17 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
 
-	"github.com/blang/semver"
+	"github.com/blang/semver/v4"
 	"github.com/docker/machine/libmachine/drivers"
 	"github.com/spf13/viper"
 	"k8s.io/minikube/pkg/drivers/qemu"
 
 	"k8s.io/minikube/pkg/minikube/config"
+	"k8s.io/minikube/pkg/minikube/detect"
 	"k8s.io/minikube/pkg/minikube/download"
 	"k8s.io/minikube/pkg/minikube/driver"
 	"k8s.io/minikube/pkg/minikube/localpath"
@@ -41,6 +41,10 @@ import (
 const docURL = "https://minikube.sigs.k8s.io/docs/reference/drivers/qemu/"
 
 func init() {
+	priority := registry.Default
+	if runtime.GOOS == "windows" {
+		priority = registry.Experimental
+	}
 	if err := registry.Register(registry.DriverDef{
 		Name:     driver.QEMU2,
 		Alias:    []string{driver.AliasQEMU},
@@ -48,7 +52,7 @@ func init() {
 		Config:   configure,
 		Status:   status,
 		Default:  true,
-		Priority: registry.Experimental,
+		Priority: priority,
 	}); err != nil {
 		panic(fmt.Sprintf("register failed: %v", err))
 	}
@@ -70,29 +74,22 @@ func qemuFirmwarePath(customPath string) (string, error) {
 	if customPath != "" {
 		return customPath, nil
 	}
+	if runtime.GOOS == "windows" {
+		return "C:\\Program Files\\qemu\\share\\edk2-x86_64-code.fd", nil
+	}
+	if detect.IsAmd64M1Emulation() {
+		return "/opt/homebrew/opt/qemu/share/qemu/edk2-x86_64-code.fd", nil
+	}
 	arch := runtime.GOARCH
 	// For macOS, find the correct brew installation path for qemu firmware
 	if runtime.GOOS == "darwin" {
-		var p, fw string
 		switch arch {
 		case "amd64":
-			p = "/usr/local/Cellar/qemu"
-			fw = "share/qemu/edk2-x86_64-code.fd"
+			return "/usr/local/opt/qemu/share/qemu/edk2-x86_64-code.fd", nil
 		case "arm64":
-			p = "/opt/homebrew/Cellar/qemu"
-			fw = "share/qemu/edk2-aarch64-code.fd"
+			return "/opt/homebrew/opt/qemu/share/qemu/edk2-aarch64-code.fd", nil
 		default:
 			return "", fmt.Errorf("unknown arch: %s", arch)
-		}
-
-		v, err := os.ReadDir(p)
-		if err != nil {
-			return "", fmt.Errorf("lookup qemu: %v", err)
-		}
-		for _, version := range v {
-			if version.IsDir() {
-				return path.Join(p, version.Name(), fw), nil
-			}
 		}
 	}
 
@@ -132,7 +129,9 @@ func configure(cc config.ClusterConfig, n config.Node) (interface{}, error) {
 	switch runtime.GOARCH {
 	case "amd64":
 		qemuMachine = "" // default
-		qemuCPU = ""     // default
+		// set cpu type to max to enable higher microarchitecture levels
+		// see https://lists.gnu.org/archive/html/qemu-devel/2022-08/msg04066.html for details
+		qemuCPU = "max"
 	case "arm64":
 		qemuMachine = "virt"
 		qemuCPU = "cortex-a72"
@@ -170,23 +169,26 @@ func configure(cc config.ClusterConfig, n config.Node) (interface{}, error) {
 			StorePath:   localpath.MiniPath(),
 			SSHUser:     "docker",
 		},
-		Boot2DockerURL: download.LocalISOResource(cc.MinikubeISO),
-		DiskSize:       cc.DiskSize,
-		Memory:         cc.Memory,
-		CPU:            cc.CPUs,
-		EnginePort:     2376,
-		FirstQuery:     true,
-		DiskPath:       filepath.Join(localpath.MiniPath(), "machines", name, fmt.Sprintf("%s.img", name)),
-		Program:        qemuSystem,
-		BIOS:           runtime.GOARCH != "arm64",
-		MachineType:    qemuMachine,
-		CPUType:        qemuCPU,
-		Firmware:       qemuFirmware,
-		VirtioDrives:   false,
-		Network:        cc.Network,
-		CacheMode:      "default",
-		IOMode:         "threads",
-		MACAddress:     mac,
+		Boot2DockerURL:        download.LocalISOResource(cc.MinikubeISO),
+		DiskSize:              cc.DiskSize,
+		Memory:                cc.Memory,
+		CPU:                   cc.CPUs,
+		EnginePort:            2376,
+		FirstQuery:            true,
+		DiskPath:              filepath.Join(localpath.MiniPath(), "machines", name, fmt.Sprintf("%s.img", name)),
+		Program:               qemuSystem,
+		BIOS:                  runtime.GOARCH != "arm64",
+		MachineType:           qemuMachine,
+		CPUType:               qemuCPU,
+		Firmware:              qemuFirmware,
+		VirtioDrives:          false,
+		Network:               cc.Network,
+		CacheMode:             "default",
+		IOMode:                "threads",
+		MACAddress:            mac,
+		SocketVMNetPath:       cc.SocketVMnetPath,
+		SocketVMNetClientPath: cc.SocketVMnetClientPath,
+		ExtraDisks:            cc.ExtraDisks,
 	}, nil
 }
 

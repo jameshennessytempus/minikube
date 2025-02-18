@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -52,7 +53,7 @@ but optionally you can also run it directly on the control plane over the ssh co
 This can be useful if you cannot run kubectl locally for some reason, like unsupported
 host. Please be aware that when using --ssh all paths will apply to the remote machine.`,
 	Example: "minikube kubectl -- --help\nminikube kubectl -- get pods --namespace kube-system",
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, args []string) {
 		cc, err := config.Load(ClusterFlagValue())
 
 		version := constants.DefaultKubernetesVersion
@@ -71,7 +72,7 @@ host. Please be aware that when using --ssh all paths will apply to the remote m
 			kc := []string{"sudo"}
 			kc = append(kc, kubectlPath(*co.Config))
 			kc = append(kc, "--kubeconfig")
-			kc = append(kc, kubeconfigPath(*co.Config))
+			kc = append(kc, kubeconfigPath())
 			args = append(kc, args...)
 
 			klog.Infof("Running SSH %v", args)
@@ -96,9 +97,24 @@ host. Please be aware that when using --ssh all paths will apply to the remote m
 			os.Exit(1)
 		}
 
-		if len(args) > 1 && args[0] != "--help" {
-			cluster := []string{"--cluster", cname}
-			args = append(cluster, args...)
+		if len(args) > 0 {
+			insertIndex := 0
+			if args[0] == cobra.ShellCompRequestCmd || args[0] == cobra.ShellCompNoDescRequestCmd {
+				// Insert right after __complete to allow code completion from the correct cluster.
+				insertIndex = 1
+			} else {
+				// Add cluster argument before first flag, but after all commands.
+				// This improves error message of kubectl in case the command is wrong.
+				insertIndex = len(args)
+				for i, arg := range args {
+					if strings.HasPrefix(arg, "-") {
+						insertIndex = i
+						break
+					}
+				}
+			}
+			clusterArg := "--cluster=" + cname
+			args = append(append(append([]string{}, args[:insertIndex]...), clusterArg), args[insertIndex:]...)
 		}
 
 		c, err := KubectlCommand(version, binaryMirror, args...)
@@ -131,7 +147,7 @@ func kubectlPath(cfg config.ClusterConfig) string {
 }
 
 // kubeconfigPath returns the path to kubeconfig
-func kubeconfigPath(cfg config.ClusterConfig) string {
+func kubeconfigPath() string {
 	return "/etc/kubernetes/admin.conf"
 }
 

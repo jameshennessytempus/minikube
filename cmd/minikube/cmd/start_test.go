@@ -18,18 +18,18 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blang/semver/v4"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	"k8s.io/klog/v2"
 	cfg "k8s.io/minikube/pkg/minikube/config"
 	"k8s.io/minikube/pkg/minikube/constants"
 	"k8s.io/minikube/pkg/minikube/cruntime"
-	"k8s.io/minikube/pkg/minikube/detect"
 	"k8s.io/minikube/pkg/minikube/driver"
 	"k8s.io/minikube/pkg/minikube/proxy"
 )
@@ -64,6 +64,16 @@ func TestGetKubernetesVersion(t *testing.T) {
 			cfg:             &cfg.ClusterConfig{KubernetesConfig: cfg.KubernetesConfig{KubernetesVersion: "v1.15.0"}},
 		},
 		{
+			description:     "kubernetes-version without patch version",
+			expectedVersion: "v1.16.15",
+			paramVersion:    "v1.16",
+		},
+		{
+			description:     "kubernetes-version without patch version",
+			expectedVersion: "v1.16.15",
+			paramVersion:    "1.16",
+		},
+		{
 			description:     "kubernetes-version given as 'stable', no config",
 			expectedVersion: constants.DefaultKubernetesVersion,
 			paramVersion:    "stable",
@@ -93,7 +103,10 @@ func TestGetKubernetesVersion(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.description, func(t *testing.T) {
 			viper.SetDefault(kubernetesVersion, test.paramVersion)
-			version := getKubernetesVersion(test.cfg)
+			version, err := getKubernetesVersion(test.cfg)
+			if err != nil {
+				klog.Warningf("failed getting Kubernetes version: %v", err)
+			}
 
 			// check whether we are getting the expected version
 			if version != test.expectedVersion {
@@ -103,9 +116,7 @@ func TestGetKubernetesVersion(t *testing.T) {
 	}
 }
 
-var checkRepoMock = func(v semver.Version, repo string) error {
-	return nil
-}
+var checkRepoMock = func(_ semver.Version, _ string) error { return nil }
 
 func TestMirrorCountry(t *testing.T) {
 	// Set default disk size value in lieu of flag init
@@ -172,13 +183,6 @@ func TestGenerateCfgFromFlagsHTTPProxyHandling(t *testing.T) {
 	// Set default disk size value in lieu of flag init
 	viper.SetDefault(humanReadableDiskSize, defaultDiskSize)
 
-	originalEnv := os.Getenv("HTTP_PROXY")
-	defer func() {
-		err := os.Setenv("HTTP_PROXY", originalEnv)
-		if err != nil {
-			t.Fatalf("Error reverting env HTTP_PROXY to it's original value. Got err: %s", err)
-		}
-	}()
 	k8sVersion := constants.NewestKubernetesVersion
 	rtime := constants.DefaultContainerRuntime
 	var tests = []struct {
@@ -222,9 +226,7 @@ func TestGenerateCfgFromFlagsHTTPProxyHandling(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.description, func(t *testing.T) {
 			cmd := &cobra.Command{}
-			if err := os.Setenv("HTTP_PROXY", test.proxy); err != nil {
-				t.Fatalf("Unexpected error setting HTTP_PROXY: %v", err)
-			}
+			t.Setenv("HTTP_PROXY", test.proxy)
 
 			cfg.DockerEnv = []string{} // clear docker env to avoid pollution
 			proxy.SetDockerEnv()
@@ -319,7 +321,6 @@ func TestBaseImageFlagDriverCombo(t *testing.T) {
 		{driver.VirtualBox, false},
 		{driver.HyperKit, false},
 		{driver.VMware, false},
-		{driver.VMwareFusion, false},
 		{driver.HyperV, false},
 		{driver.Parallels, false},
 		{"something_invalid", false},
@@ -382,6 +383,22 @@ func TestValidateImageRepository(t *testing.T) {
 			imageRepository:      "registry.test.com:6666/google_containers",
 			validImageRepository: "registry.test.com:6666/google_containers",
 		},
+		{
+			imageRepository:      "registry.1test.com:6666/google_containers",
+			validImageRepository: "registry.1test.com:6666/google_containers",
+		},
+		{
+			imageRepository:      "registry.t1est.com:6666/google_containers",
+			validImageRepository: "registry.t1est.com:6666/google_containers",
+		},
+		{
+			imageRepository:      "registry.test1.com:6666/google_containers",
+			validImageRepository: "registry.test1.com:6666/google_containers",
+		},
+		{
+			imageRepository:      "abc.xyz1.example.com",
+			validImageRepository: "abc.xyz1.example.com",
+		},
 	}
 
 	for _, test := range tests {
@@ -393,7 +410,6 @@ func TestValidateImageRepository(t *testing.T) {
 			}
 		})
 	}
-
 }
 
 func TestValidateDiskSize(t *testing.T) {
@@ -441,7 +457,6 @@ func TestValidateRuntime(t *testing.T) {
 			runtime:  "docker",
 			errorMsg: "",
 		},
-
 		{
 			runtime:  "test",
 			errorMsg: fmt.Sprintf("Invalid Container Runtime: test. Valid runtimes are: %v", cruntime.ValidRuntimes()),
@@ -461,180 +476,384 @@ func TestValidateRuntime(t *testing.T) {
 	}
 }
 
+func TestIsTwoDigitSemver(t *testing.T) {
+	var tcs = []struct {
+		desc     string
+		version  string
+		expected bool
+	}{
+		{
+			desc:     "a valid three digit version",
+			version:  "1.26.5",
+			expected: false,
+		},
+		{
+			desc:     "a valid two digit version",
+			version:  "1.26",
+			expected: true,
+		},
+		{
+			desc:     "a valid two digit version with a period",
+			version:  "1.26.",
+			expected: false,
+		},
+		{
+			desc:     "an invalid major version",
+			version:  "2",
+			expected: false,
+		},
+		{
+			desc:     "a valid major version",
+			version:  "1",
+			expected: false,
+		},
+		{
+			desc:     "a two digit version with a 0 as the major/minor components",
+			version:  "0.0",
+			expected: true,
+		},
+		{
+			desc:     "a two digit version with negative major version",
+			version:  "-1.0",
+			expected: false,
+		},
+		{
+			desc:     "a two digit version with negative minor version",
+			version:  "1.-1",
+			expected: false,
+		},
+		{
+			desc:     "a missing minor version",
+			version:  "1.",
+			expected: false,
+		},
+		{
+			desc:     "a missing major version",
+			version:  ".2",
+			expected: false,
+		},
+		{
+			desc:     "a valid two digit version with whitespace between components",
+			version:  "1. 1",
+			expected: false,
+		},
+		{
+			desc:     "a two digit version with a non-digit major component",
+			version:  "a.12",
+			expected: false,
+		},
+		{
+			desc:     "a two digit version with a non-digit minor component",
+			version:  "1.a",
+			expected: false,
+		},
+		{
+			desc:     "a two digit version with extraneous non-digits in minor component",
+			version:  "1.2a",
+			expected: false,
+		},
+		{
+			desc:     "a two digit version larger major/minor components",
+			version:  "123456789.987654321",
+			expected: true,
+		},
+		{
+			desc:     "a valid two digit version with a version prefix",
+			version:  "v1.26",
+			expected: false,
+		},
+		{
+			desc:     "a valid three digit version with a version prefix",
+			version:  "v1.26.5",
+			expected: false,
+		},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.desc, func(t *testing.T) {
+			actual := isTwoDigitSemver(tc.version)
+			// check whether the function correctly verifies if it is a 2 digit semver
+			if actual != tc.expected {
+				t.Fatalf("test failed. Expected version %s to return %t", tc.version, tc.expected)
+			}
+		})
+	}
+}
+
 func TestValidatePorts(t *testing.T) {
-	isMicrosoftWSL := detect.IsMicrosoftWSL()
 	type portTest struct {
-		// isTarget indicates whether or not the test case is covered
-		// because validatePorts behaves differently depending on whether process is running in WSL in windows or not.
-		isTarget bool
 		ports    []string
 		errorMsg string
 	}
 	var tests = []portTest{
 		{
-			isTarget: true,
 			ports:    []string{"8080:80"},
 			errorMsg: "",
 		},
 		{
-			isTarget: true,
 			ports:    []string{"8080:80/tcp", "8080:80/udp"},
 			errorMsg: "",
 		},
 		{
-			isTarget: true,
 			ports:    []string{"test:8080"},
 			errorMsg: "Sorry, one of the ports provided with --ports flag is not valid [test:8080] (Invalid hostPort: test)",
 		},
 		{
-			isTarget: true,
 			ports:    []string{"0:80"},
 			errorMsg: "Sorry, one of the ports provided with --ports flag is outside range: 0",
 		},
 		{
-			isTarget: true,
 			ports:    []string{"0:80/tcp"},
 			errorMsg: "Sorry, one of the ports provided with --ports flag is outside range: 0",
 		},
 		{
-			isTarget: true,
 			ports:    []string{"65536:80/udp"},
 			errorMsg: "Sorry, one of the ports provided with --ports flag is not valid [65536:80/udp] (Invalid hostPort: 65536)",
 		},
 		{
-			isTarget: true,
 			ports:    []string{"0-1:80-81/tcp"},
 			errorMsg: "Sorry, one of the ports provided with --ports flag is outside range: 0",
 		},
 		{
-			isTarget: true,
 			ports:    []string{"0-1:80-81/udp"},
 			errorMsg: "Sorry, one of the ports provided with --ports flag is outside range: 0",
 		},
 		{
-			isTarget: !isMicrosoftWSL,
 			ports:    []string{"80:80", "1023-1025:8023-8025", "1023-1025:8023-8025/tcp", "1023-1025:8023-8025/udp"},
 			errorMsg: "",
 		},
 		{
-			isTarget: isMicrosoftWSL,
-			ports:    []string{"80:80"},
-			errorMsg: "Sorry, you cannot use privileged ports on the host (below 1024): 80",
-		},
-		{
-			isTarget: isMicrosoftWSL,
-			ports:    []string{"1023-1025:8023-8025"},
-			errorMsg: "Sorry, you cannot use privileged ports on the host (below 1024): 1023",
-		},
-		{
-			isTarget: isMicrosoftWSL,
-			ports:    []string{"1023-1025:8023-8025/tcp"},
-			errorMsg: "Sorry, you cannot use privileged ports on the host (below 1024): 1023",
-		},
-		{
-			isTarget: isMicrosoftWSL,
-			ports:    []string{"1023-1025:8023-8025/udp"},
-			errorMsg: "Sorry, you cannot use privileged ports on the host (below 1024): 1023",
-		},
-		{
-			isTarget: true,
 			ports:    []string{"127.0.0.1:8080:80", "127.0.0.1:8081:80/tcp", "127.0.0.1:8081:80/udp", "127.0.0.1:8082-8083:8082-8083/tcp"},
 			errorMsg: "",
 		},
 		{
-			isTarget: true,
 			ports:    []string{"1000.0.0.1:80:80"},
 			errorMsg: "Sorry, one of the ports provided with --ports flag is not valid [1000.0.0.1:80:80] (Invalid ip address: 1000.0.0.1)",
 		},
 		{
-			isTarget: !isMicrosoftWSL,
 			ports:    []string{"127.0.0.1:80:80", "127.0.0.1:81:81/tcp", "127.0.0.1:81:81/udp", "127.0.0.1:82-83:82-83/tcp", "127.0.0.1:82-83:82-83/udp"},
 			errorMsg: "",
 		},
 		{
-			isTarget: isMicrosoftWSL,
-			ports:    []string{"127.0.0.1:80:80"},
-			errorMsg: "Sorry, you cannot use privileged ports on the host (below 1024): 80",
-		},
-		{
-			isTarget: isMicrosoftWSL,
-			ports:    []string{"127.0.0.1:81:81/tcp"},
-			errorMsg: "Sorry, you cannot use privileged ports on the host (below 1024): 81",
-		},
-		{
-			isTarget: isMicrosoftWSL,
-			ports:    []string{"127.0.0.1:81:81/udp"},
-			errorMsg: "Sorry, you cannot use privileged ports on the host (below 1024): 81",
-		},
-		{
-			isTarget: isMicrosoftWSL,
-			ports:    []string{"127.0.0.1:80-83:80-83/tcp"},
-			errorMsg: "Sorry, you cannot use privileged ports on the host (below 1024): 80",
-		},
-		{
-			isTarget: isMicrosoftWSL,
-			ports:    []string{"127.0.0.1:80-83:80-83/udp"},
-			errorMsg: "Sorry, you cannot use privileged ports on the host (below 1024): 80",
-		},
-		{
-			isTarget: true,
 			ports:    []string{"80"},
 			errorMsg: "",
 		},
 		{
-			isTarget: true,
 			ports:    []string{"80", "65535", "65536"},
 			errorMsg: "Sorry, one of the ports provided with --ports flag is outside range: 65536",
 		},
 		{
-			isTarget: true,
 			ports:    []string{"0", "80", "65535"},
 			errorMsg: "Sorry, one of the ports provided with --ports flag is outside range: 0",
 		},
 		{
-			isTarget: true,
 			ports:    []string{"cats"},
 			errorMsg: "Sorry, one of the ports provided with --ports flag is not valid: cats",
 		},
 		{
-			isTarget: true,
 			ports:    []string{"127.0.0.1:81:0/tcp"},
 			errorMsg: "Sorry, one of the ports provided with --ports flag is outside range: 0",
 		},
 		{
-			isTarget: true,
 			ports:    []string{"127.0.0.1:81:65536/tcp"},
 			errorMsg: "Sorry, one of the ports provided with --ports flag is not valid [127.0.0.1:81:65536/tcp] (Invalid containerPort: 65536)",
 		},
 		{
-			isTarget: true,
 			ports:    []string{"1-65536:80-81/tcp"},
 			errorMsg: "Sorry, one of the ports provided with --ports flag is not valid [1-65536:80-81/tcp] (Invalid hostPort: 1-65536)",
 		},
 		{
-			isTarget: true,
 			ports:    []string{"1-80:0-81/tcp"},
 			errorMsg: "Sorry, one of the ports provided with --ports flag is not valid [1-80:0-81/tcp] (Invalid ranges specified for container and host Ports: 0-81 and 1-80)",
 		},
 		{
-			isTarget: true,
 			ports:    []string{"1-80:1-65536/tcp"},
 			errorMsg: "Sorry, one of the ports provided with --ports flag is not valid [1-80:1-65536/tcp] (Invalid containerPort: 1-65536)",
 		},
 	}
 	for _, test := range tests {
 		t.Run(strings.Join(test.ports, ","), func(t *testing.T) {
-			if !test.isTarget {
-				return
-			}
 			gotError := ""
 			got := validatePorts(test.ports)
 			if got != nil {
 				gotError = got.Error()
 			}
-			if gotError != test.errorMsg {
+			if !strings.EqualFold(gotError, test.errorMsg) {
 				t.Errorf("validatePorts(ports=%v): got %v, expected %v", test.ports, got, test.errorMsg)
 			}
 		})
+	}
+}
+
+func TestValidateSubnet(t *testing.T) {
+	type subnetTest struct {
+		subnet   string
+		errorMsg string
+	}
+	var tests = []subnetTest{
+		{
+			subnet:   "192.168.1.1",
+			errorMsg: "",
+		},
+		{
+			subnet:   "193.169.1.1",
+			errorMsg: "Sorry, the subnet 193.169.1.1 is not a private IP",
+		},
+		{
+			subnet:   "192.168.1.1/24",
+			errorMsg: "",
+		},
+		{
+			subnet:   "192.168.1.1/32",
+			errorMsg: "Sorry, the subnet provided does not have a mask less than or equal to /30",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.subnet, func(t *testing.T) {
+			gotError := ""
+			got := validateSubnet(test.subnet)
+			if got != nil {
+				gotError = got.Error()
+			}
+			if gotError != test.errorMsg {
+				t.Errorf("validateSubnet(subnet=%v): got %v, expected %v", test.subnet, got, test.errorMsg)
+			}
+		})
+	}
+}
+
+func TestValidateStaticIP(t *testing.T) {
+	tests := []struct {
+		staticIP string
+		drvName  string
+		errorMsg string
+	}{
+		{
+			staticIP: "8.8.8.8",
+			drvName:  "docker",
+			errorMsg: "static IP must be private",
+		},
+		{
+			staticIP: "8.8.8.8",
+			drvName:  "hyperkit",
+			errorMsg: "",
+		},
+		{
+			staticIP: "fdfc:a4c0:e99e:7ad3::",
+			drvName:  "docker",
+			errorMsg: "static IP must be IPv4",
+		},
+		{
+			staticIP: "192.168.49.0",
+			drvName:  "docker",
+			errorMsg: "static IPs last octet must be between 2 and 254 (X.X.X.2 - X.X.X.254), for example 192.168.200.200",
+		},
+		{
+			staticIP: "192.168.49.1",
+			drvName:  "docker",
+			errorMsg: "static IPs last octet must be between 2 and 254 (X.X.X.2 - X.X.X.254), for example 192.168.200.200",
+		},
+		{
+			staticIP: "192.168.49.255",
+			drvName:  "docker",
+			errorMsg: "static IPs last octet must be between 2 and 254 (X.X.X.2 - X.X.X.254), for example 192.168.200.200",
+		},
+		{
+			staticIP: "192.168.49.2",
+			drvName:  "docker",
+			errorMsg: "",
+		},
+		{
+			staticIP: "192.168.49.254",
+			drvName:  "docker",
+			errorMsg: "",
+		},
+	}
+	for _, tt := range tests {
+		gotError := ""
+		got := validateStaticIP(tt.staticIP, tt.drvName, "")
+		if got != nil {
+			gotError = got.Error()
+		}
+		if gotError != tt.errorMsg {
+			t.Errorf("validateStaticIP(%s, %s): got %v, expected %v", tt.staticIP, tt.drvName, got, tt.errorMsg)
+		}
+	}
+}
+
+func TestImageMatchesBinaryVersion(t *testing.T) {
+	tests := []struct {
+		imageVersion  string
+		binaryVersion string
+		versionMatch  bool
+	}{
+		{"v1.17.0", "v1.17.0", true},
+		{"v1.17.0", "v1.20.0", false},
+		{"v1.31.0", "v1.31.1", true},
+		{"v1.31.1", "v1.31.0", false},
+	}
+
+	for _, tc := range tests {
+		got := imageMatchesBinaryVersion(tc.imageVersion, tc.binaryVersion)
+		if got != tc.versionMatch {
+			t.Errorf("imageMatchesBinaryVersion(%s, %s) = %t; want = %t", tc.imageVersion, tc.binaryVersion, got, tc.versionMatch)
+		}
+	}
+}
+
+func TestValidateGPUs(t *testing.T) {
+	tests := []struct {
+		gpus     string
+		drvName  string
+		runtime  string
+		errorMsg string
+	}{
+		{"", "kvm", "containerd", ""},
+		{"all", "docker", "docker", ""},
+		{"nvidia", "docker", "docker", ""},
+		{"all", "docker", "", ""},
+		{"nvidia", "docker", "", ""},
+		{"all", "kvm", "docker", "The gpus flag can only be used with the docker driver and docker container-runtime"},
+		{"nvidia", "docker", "containerd", "The gpus flag can only be used with the docker driver and docker container-runtime"},
+		{"cat", "docker", "docker", `The gpus flag must be passed a value of "nvidia", "amd" or "all"`},
+		{"amd", "docker", "docker", ""},
+		{"amd", "docker", "", ""},
+		{"amd", "docker", "containerd", "The gpus flag can only be used with the docker driver and docker container-runtime"},
+	}
+
+	for _, tc := range tests {
+		gotError := ""
+		got := validateGPUs(tc.gpus, tc.drvName, tc.runtime)
+		if got != nil {
+			gotError = got.Error()
+		}
+		if gotError != tc.errorMsg {
+			t.Errorf("validateGPUs(%s, %s, %s) = %q; want = %q", tc.gpus, tc.drvName, tc.runtime, got, tc.errorMsg)
+		}
+	}
+}
+
+func TestValidateAutoPause(t *testing.T) {
+	tests := []struct {
+		interval    string
+		shouldError bool
+	}{
+		{"1m0s", false},
+		{"5m", false},
+		{"1s", false},
+		{"0s", true},
+		{"-2m", true},
+	}
+	for _, tc := range tests {
+		input, err := time.ParseDuration(tc.interval)
+		if err != nil {
+			t.Fatalf("test has an invalid input duration of %q", tc.interval)
+		}
+		err = validateAutoPauseInterval(input)
+		if err != nil && !tc.shouldError {
+			t.Errorf("interval of %q failed validation; expected it to pass: %v", input, err)
+		}
+		if err == nil && tc.shouldError {
+			t.Errorf("interval of %q passed validataion; expected it to fail: %v", input, err)
+		}
 	}
 }

@@ -41,7 +41,9 @@ import (
 	"k8s.io/minikube/pkg/minikube/cruntime"
 	"k8s.io/minikube/pkg/minikube/download"
 	"k8s.io/minikube/pkg/minikube/driver"
+	"k8s.io/minikube/pkg/minikube/exit"
 	"k8s.io/minikube/pkg/minikube/out"
+	"k8s.io/minikube/pkg/minikube/reason"
 	"k8s.io/minikube/pkg/minikube/style"
 	"k8s.io/minikube/pkg/minikube/sysinit"
 	"k8s.io/minikube/pkg/util/retry"
@@ -81,25 +83,38 @@ func (d *Driver) Create() error {
 		ClusterLabel:  oci.ProfileLabelKey + "=" + d.MachineName,
 		NodeLabel:     oci.NodeLabelKey + "=" + d.NodeConfig.MachineName,
 		CPUs:          strconv.Itoa(d.NodeConfig.CPU),
-		Memory:        strconv.Itoa(d.NodeConfig.Memory) + "mb",
+		Memory:        strconv.Itoa(d.NodeConfig.Memory),
 		Envs:          d.NodeConfig.Envs,
 		ExtraArgs:     append([]string{"--expose", fmt.Sprintf("%d", d.NodeConfig.APIServerPort)}, d.NodeConfig.ExtraArgs...),
 		OCIBinary:     d.NodeConfig.OCIBinary,
 		APIServerPort: d.NodeConfig.APIServerPort,
+		GPUs:          d.NodeConfig.GPUs,
+	}
+	if params.Memory != "0" {
+		params.Memory += "mb"
 	}
 
 	networkName := d.NodeConfig.Network
 	if networkName == "" {
 		networkName = d.NodeConfig.ClusterName
 	}
-	if gateway, err := oci.CreateNetwork(d.OCIBinary, networkName, d.NodeConfig.Subnet); err != nil {
-		out.WarningT("Unable to create dedicated network, this might result in cluster IP change after restart: {{.error}}", out.V{"error": err})
+	staticIP := d.NodeConfig.StaticIP
+	if gateway, err := oci.CreateNetwork(d.OCIBinary, networkName, d.NodeConfig.Subnet, staticIP); err != nil {
+		msg := "Unable to create dedicated network, this might result in cluster IP change after restart: {{.error}}"
+		args := out.V{"error": err}
+		if staticIP != "" {
+			exit.Message(reason.IfDedicatedNetwork, msg, args)
+		}
+		out.WarningT(msg, args)
+	} else if gateway != nil && staticIP != "" {
+		params.Network = networkName
+		params.IP = staticIP
 	} else if gateway != nil {
 		params.Network = networkName
 		ip := gateway.To4()
 		// calculate the container IP based on guessing the machine index
 		index := driver.IndexFromMachineName(d.NodeConfig.MachineName)
-		if int(ip[3])+index > 255 {
+		if int(ip[3])+index > 253 { // reserve last client ip address for multi-control-plane loadbalancer vip address in ha cluster
 			return fmt.Errorf("too many machines to calculate an IP")
 		}
 		ip[3] += byte(index)
@@ -185,7 +200,7 @@ func (d *Driver) Create() error {
 			}
 			klog.Infof("Unable to extract preloaded tarball to volume: %v", err)
 		} else {
-			klog.Infof("duration metric: took %f seconds to extract preloaded images to volume", time.Since(t).Seconds())
+			klog.Infof("duration metric: took %s to extract preloaded images to volume ...", time.Since(t))
 		}
 	}()
 	waitForPreload.Wait()
